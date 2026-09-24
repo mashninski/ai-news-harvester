@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title>Simon Willison's Weblog</title>
+  <id>http://simonwillison.net/</id>
+  <updated>2026-09-23T17:12:27+00:00</updated>
+  <entry>
+    <title>Claude Cowork and chat are now one Claude</title>
+    <link href="https://simonwillison.net/2026/Sep/22/cowork-and-chat/#atom-everything" rel="alternate"/>
+    <id>https://simonwillison.net/2026/Sep/22/cowork-and-chat/</id>
+    <published>2026-09-22T19:00:00+00:00</published>
+    <updated>2026-09-22T19:00:00+00:00</updated>
+    <content type="html">&lt;p&gt;Anthropic merged the two interfaces.&lt;/p&gt;</content>
+  </entry>
+  <entry>
+    <title>Shadow roots, explained with live examples</title>
+    <link href="https://simonwillison.net/2026/Sep/23/shadow-roots/#atom-everything" rel="alternate"/>
+    <id>https://simonwillison.net/2026/Sep/23/shadow-roots/</id>
+    <published>2026-09-23T16:37:18+00:00</published>
+    <updated>2026-09-23T16:37:18+00:00</updated>
+    <content type="html">&lt;p&gt;A tool for exploring the Shadow DOM.&lt;/p&gt;</content>
+  </entry>
+</feed>

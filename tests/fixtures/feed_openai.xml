@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>OpenAI News</title>
+    <link>https://openai.com/news</link>
+    <item>
+      <title>Introducing GPT-6 Sol and Luna</title>
+      <link>https://openai.com/index/introducing-gpt-6-sol-and-luna</link>
+      <description>Two new models: Sol for depth, Luna for speed.</description>
+      <pubDate>Tue, 22 Sep 2026 15:00:00 GMT</pubDate>
+    </item>
+    <item>
+      <title>Better prompt caching for GPT-6</title>
+      <link>https://openai.com/index/better-prompt-caching</link>
+      <description>Cached input is now cheaper.</description>
+      <pubDate>Tue, 22 Sep 2026 21:00:00 GMT</pubDate>
+    </item>
+  </channel>
+</rss>
