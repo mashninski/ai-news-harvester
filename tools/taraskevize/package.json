@@ -1,0 +1,10 @@
+{
+  "name": "taraskevize",
+  "private": true,
+  "description": "Наркамаўка → тарашкевіца для пайплайна ai-news-harvester: обёртка над npm-пакетом taraskevizer",
+  "type": "module",
+  "license": "MIT",
+  "dependencies": {
+    "taraskevizer": "10.4.24"
+  }
+}

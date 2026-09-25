@@ -10,7 +10,8 @@
      архив, без отсечки первый прогон выдал бы ~2500 «новых»;
   5. склеивает одну новость из разных источников по словам заголовка —
      и внутри прогона, и с отданным в прошлых прогонах за последние 72 часа;
-  6. печатает список новых и записывает всё увиденное в состояние.
+  6. печатает список новых и записывает всё увиденное в состояние, а текст
+     новых материалов — в таблицу article для пайплайна (pipeline.py).
 
 Сломанный источник (сеть, таймаут, HTTP-ошибка, битый XML) пропускается
 с предупреждением в лог, остальные собираются как обычно.
@@ -57,6 +58,10 @@ SOURCES = [
     {"id": "venturebeat", "kind": "rss",    "url": "https://venturebeat.com/category/ai/feed/"},
     {"id": "mittr",      "kind": "rss",     "url": "https://www.technologyreview.com/topic/artificial-intelligence/feed"},
     {"id": "willison",   "kind": "rss",     "url": "https://simonwillison.net/atom/everything/"},
+    # Кандидаты из спеки, §2 («требуют ручной проверки»): Ars Technica AI, Meta AI,
+    # Mistral AI, Microsoft AI. 24.09.2026 проверить не удалось — из облачной сессии
+    # сайты источников закрыты сетевой политикой. Добавлять сюда только после
+    # проверки: python probe_feeds.py
 ]
 
 # Блоги самих компаний. В кластере основным становится материал отсюда:
@@ -69,7 +74,8 @@ MAX_AGE_DAYS = 7              # старше — пишем в состояни�
 NEWS_PATH = re.compile(r"^/news/[^/]+$")   # /news/<slug>; сама лента /news сюда не входит
 SITEMAP_MAX_DEPTH = 2         # sitemap index → вложенные sitemap, глубже не ходим
 PAGE_FETCH_LIMIT = 15         # страниц за прогон; не скачанные подождут следующего
-BODY_PARAGRAPHS = 6           # сколько абзацев статьи брать в body
+BODY_PARAGRAPHS = 12          # сколько абзацев статьи брать в body
+BODY_MAX_WORDS = 700          # больше для пересказа не нужно (спека, §3, п. 3)
 
 # Склейка заголовков — значения подобраны на реальной выдаче 24.09.2026,
 # разбор в журнале сайта за эту дату
@@ -190,12 +196,17 @@ def fetch_rss(source: dict, is_seen, cutoff: datetime) -> list[Item]:
         link, title = e.get("link"), (e.get("title") or "").strip()
         if not link or not title:
             continue
-        parsed = e.get("published_parsed") or e.get("updated_parsed")
-        published = iso(datetime.fromtimestamp(calendar.timegm(parsed), timezone.utc)) if parsed else None
-        # content:encoded (или atom content), если есть, — он полнее summary
-        content = e.get("content") or []
-        body_html = content[0].get("value", "") if content else e.get("summary", "")
-        items.append(Item(source["id"], clean_url(link), published, title, html_to_text(body_html)))
+        try:
+            parsed = e.get("published_parsed") or e.get("updated_parsed")
+            published = iso(datetime.fromtimestamp(calendar.timegm(parsed), timezone.utc)) if parsed else None
+            # content:encoded (или atom content), если есть, — он полнее summary
+            content = e.get("content") or []
+            body_html = content[0].get("value", "") if content else e.get("summary", "")
+            items.append(Item(source["id"], clean_url(link), published, title, html_to_text(body_html)))
+        except Exception as ex:
+            # Одна кривая запись (ссылка «http://[…», дата за пределами календаря)
+            # не должна уносить с собой весь источник
+            log.warning("%s: пропущена запись %r — %s: %s", source["id"], link, type(ex).__name__, ex)
     return items
 
 
@@ -225,8 +236,10 @@ MONTHS = "Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec"
 TEXT_DATE = re.compile(rf"({MONTHS})[a-z]* (\d{{1,2}}), (\d{{4}})\b")
 
 
-def parse_article(html: bytes) -> tuple[str, str, str | None]:
-    """Заголовок, первые абзацы и дата публикации со страницы статьи."""
+def parse_article(html: bytes, max_paragraphs: int = BODY_PARAGRAPHS) -> tuple[str, str, str | None]:
+    """Заголовок, первые абзацы и дата публикации со страницы статьи.
+    Пайплайн (pipeline.py) зовёт её же, когда в фиде DeepMind или Hugging Face
+    текста почти нет: одна и та же разборка страниц на оба случая."""
     soup = BeautifulSoup(html, "html.parser")
 
     og = soup.find("meta", property="og:title")
@@ -256,7 +269,7 @@ def parse_article(html: bytes) -> tuple[str, str, str | None]:
         text = re.sub(r"\s+", " ", p.get_text(" ", strip=True))
         if len(text) >= 60 and "." in text:
             paras.append(text)
-        if len(paras) >= BODY_PARAGRAPHS:
+        if len(paras) >= max_paragraphs:
             break
     return title, "\n\n".join(paras), published
 
@@ -269,10 +282,15 @@ def fetch_sitemap(source: dict, is_seen, cutoff: datetime) -> list[Item]:
 
     fresh, stale = [], []
     for loc, lastmod in sitemap_urls(source["url"]):
-        parts = urlsplit(loc)
-        if parts.netloc != base.netloc or not NEWS_PATH.match(parts.path.rstrip("/")):
+        try:
+            parts = urlsplit(loc)
+            if parts.netloc != base.netloc or not NEWS_PATH.match(parts.path.rstrip("/")):
+                continue
+            url = clean_url(loc)
+        except ValueError as ex:
+            # Кривой адрес в sitemap — пропускаем его, а не весь sitemap
+            log.warning("%s: пропущен адрес %r — %s", source["id"], loc, ex)
             continue
-        url = clean_url(loc)
         if is_seen(url_hash(url)):
             continue
         mod = parse_iso(lastmod)
@@ -424,10 +442,25 @@ def open_state(path: Path) -> sqlite3.Connection:
     return db
 
 
-def save(db: sqlite3.Connection, rows: list[tuple]):
+def truncate_words(text: str, limit: int = BODY_MAX_WORDS) -> str:
+    """Первые limit слов с сохранением абзацев."""
+    out, n = [], 0
+    for para in text.split("\n\n"):
+        words = para.split()
+        if n + len(words) > limit:
+            if limit - n > 0:
+                out.append(" ".join(words[: limit - n]) + " …")
+            break
+        out.append(para)
+        n += len(words)
+    return "\n\n".join(out)
+
+
+def save(db: sqlite3.Connection, rows: list[tuple], bodies: list[tuple] = ()):
     db.executemany(
         "INSERT OR IGNORE INTO seen (hash, url, source, title, published_at, first_seen_at, status, primary_hash)"
         " VALUES (?, ?, ?, ?, ?, ?, ?, ?)", rows)
+    db.executemany("INSERT OR IGNORE INTO article (hash, body) VALUES (?, ?)", bodies)
     db.commit()
 
 
@@ -499,8 +532,10 @@ def collect(db: sqlite3.Connection, sources=SOURCES, now: datetime | None = None
              for d, p in late]
     rows += [(s.hash, s.url, s.source, s.title or None, s.published_at, stamp, "stale", None)
              for s in stale]
+    # Текст — только основным материалам: пайплайн берёт из состояния status = 'new'
+    bodies = [(p.hash, truncate_words(p.body)) for p in primaries]
     if not dry_run:
-        save(db, rows)
+        save(db, rows, bodies)
 
     primaries.sort(key=lambda it: it.published_at or "", reverse=True)
     dups = sum(len(p.duplicates) for p in primaries) + len(late)
@@ -547,6 +582,16 @@ def main():
             "late_duplicates": [{**asdict(d), "primary_hash": p.hash} for d, p in res.late],
         }
         Path(args.json).write_text(json.dumps(out, ensure_ascii=False, indent=2), encoding="utf-8")
+    if all_failed(res):
+        # Один-два упавших источника — штатно (VentureBeat падает каждый прогон).
+        # Упали все — это уже не битый фид, а сеть или сам коллектор: код 1, чтобы
+        # воркфлоу покраснел и пришло письмо, а не «успешный» прогон с нулём новостей
+        print("НИ ОДИН ИСТОЧНИК НЕ ОТВЕТИЛ", file=sys.stderr)
+        sys.exit(1)
+
+
+def all_failed(res: Result, sources=SOURCES) -> bool:
+    return len(res.failed) >= len(sources)
 
 
 if __name__ == "__main__":
