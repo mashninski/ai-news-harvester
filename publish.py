@@ -274,15 +274,16 @@ def make_body(entries: list[Entry], skipped, base: str, when: datetime) -> str:
         "У разьметцы `{{term:слаг|форма}}` мяняецца толькі форма пасьля `|`.",
         "- **Адхіліць картку** — у файле «⋯» → «Delete file». Бот яе больш не прапануе.",
         "",
-        "| # | Файл | Загаловак | Крыніца | Дата | Заўвагі |",
-        "|---|---|---|---|---|---|",
     ]
+    # Список, а не таблица: таблица на телефоне шире экрана, и колонка заметок
+    # уезжала вправо за край (первый живой PR, 25.09.2026)
     for i, e in enumerate(entries, 1):
         src = next((s for s in e.site["sources"] if s["primary"]), e.site["sources"][0])
         n = sum(c["body"].count("\n") + 1 for c in e.comments)   # после склейки одинаковых
-        out.append(f"| {i} | `{e.card['id'][:12]}` | {md_cell(e.site['be_title'])} | "
-                   f"[{md_cell(src['source'])}]({src['url']}) | {date_be(e.site['published_at'])} | "
-                   f"{n or '—'} |")
+        notes = f"**заўвагі: {n}**" if n else "без заўваг"
+        out.append(f"{i}. **{md_cell(e.site['be_title'])}** · {notes} · "
+                   f"[{md_cell(src['source'])}]({src['url']}) · {date_be(e.site['published_at'])} · "
+                   f"`{e.card['id'][:12]}`")
     if skipped:
         out += ["", f"### Не ўвайшлі — {len(skipped)}", "",
                 "Гэтых картак у PR няма: такую памылку не выправіць праўкай слова ў дыфе.", ""]

@@ -124,6 +124,9 @@ def test_body_for_test_branch_warns_not_prod_and_escapes_table():
     plan = publish.plan_pr([card(1, be_title="A | B")], [], set(), "naviny-test", WHEN)
     assert "не прод" in plan.body and "`naviny-test`" in plan.body
     assert "A \\| B" in plan.body
+    # список, а не таблица: на телефоне таблица шире экрана
+    assert "1. **A \\| B** · без заўваг · [openai](https://openai.com/news/1) · 22.09.2026 · `" in plan.body
+    assert "| # |" not in plan.body
 
 
 def test_plural():
