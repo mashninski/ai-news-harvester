@@ -87,14 +87,16 @@ jobs:
       - name: Коллектор
         run: python collect.py
 
+      # Секрет Actions называется ANTHROPIC_API_KEY, а переменная процесса —
+      # AI_NEWS_ANTHROPIC_KEY: её читает llm.py. Имена разные намеренно, см. CLAUDE.md
       - name: Секреты платной части
         if: ${{ !cancelled() && env.PIPELINE == 'on' && steps.guard.outcome == 'success' }}
         env:
-          AI_NEWS_ANTHROPIC_KEY: ${{ secrets.AI_NEWS_ANTHROPIC_KEY }}
+          AI_NEWS_ANTHROPIC_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           AI_NEWS_SITE_TOKEN: ${{ secrets.AI_NEWS_SITE_TOKEN }}
         run: |
           ok=1
-          [[ -n "$AI_NEWS_ANTHROPIC_KEY" ]] || { echo "::error::Нет секрета AI_NEWS_ANTHROPIC_KEY — ключ Anthropic API"; ok=0; }
+          [[ -n "$AI_NEWS_ANTHROPIC_KEY" ]] || { echo "::error::Нет секрета ANTHROPIC_API_KEY — ключ Anthropic API"; ok=0; }
           [[ -n "$AI_NEWS_SITE_TOKEN" ]] || { echo "::error::Нет секрета AI_NEWS_SITE_TOKEN — токен GitHub на mashninski-site"; ok=0; }
           [[ $ok == 1 ]]
 
@@ -128,7 +130,7 @@ jobs:
       - name: Пайплайн
         if: ${{ !cancelled() && env.PIPELINE == 'on' && steps.guard.outcome == 'success' }}
         env:
-          AI_NEWS_ANTHROPIC_KEY: ${{ secrets.AI_NEWS_ANTHROPIC_KEY }}
+          AI_NEWS_ANTHROPIC_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           AI_NEWS_SITE_REPO: ${{ github.workspace }}/site
         run: python pipeline.py
 
