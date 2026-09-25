@@ -112,6 +112,15 @@ def test_lint_does_not_catch_neighbour_words(linter):
     assert found(linter, "Гэта зьяўленьне новых мадэляў.") == []
 
 
+def test_lint_endings_with_u_short(linter):
+    # Текст ищется после _fold (ў → у), окончания «-аў», «-ўся» — тоже:
+    # до 25.09.2026 они не совпадали ни с чем
+    rx = __import__("re").compile(lint._pattern("рэзультаты"))
+    assert rx.search(lint._fold("Рэзультатаў пакуль няма."))
+    rx = __import__("re").compile(lint._pattern("аказацца"))
+    assert rx.search(lint._fold("Ён аказаўся правым."))
+
+
 def test_lint_verb_noun_phrase_in_any_order(linter):
     assert found(linter, "Кампанія прыняла актыўны ўдзел.")[0][1] == "прыняць удзел"
     assert found(linter, "Раунд вялі яны, а ўдзел у ім таксама прынялі іншыя.")[0][1] == "прыняць удзел"
@@ -206,6 +215,9 @@ def site(tmp_path):
         {"avoid": "з'яўляецца", "prefer": ["ёсць"], "category": "звязка", "note": ""}]}), encoding="utf-8")
     (c / "ai-news-converter-guards.json").write_text(json.dumps({"entries": [
         {"match": "Шах", "form": "word"}]}), encoding="utf-8")
+    (c / "ai-news-names.json").write_text(json.dumps({"entries": [
+        {"en": "Simon Willison", "write": "Саймон Уілісан", "be": "Саймон Ўілісан", "who": "блогер"},
+        {"en": "Demis Hassabis", "write": "Дэміс Хасабіс", "be": "Дэміс Хасабіс", "who": ""}]}), encoding="utf-8")
     return tmp_path / "site"
 
 
@@ -339,3 +351,28 @@ def test_prompt_reference_block_is_stable(site):
     prompts.reference_block.cache_clear()
     b = prompts.cached_system(site, prompts.FIX_TASK)[0]["text"]
     assert a == b and "fine-tuning | fine-tuning → файн-цюнінг" in a
+    # Имена: как пишет модель; форма на сайте — только где конвертер её меняет
+    assert "Simon Willison → Саймон Уілісан (на сайце: Саймон Ўілісан) — блогер" in a
+    assert "Demis Hassabis → Дэміс Хасабіс\n" in a
+
+
+def test_generate_prompt_keeps_publication_date_out():
+    item = {"source": "techcrunch", "title": "t", "url": "u", "published_at": "2026-09-17T10:00:00Z", "body": "b"}
+    assert "у тэкст не пішы" in prompts.generate_user(item)
+    assert "дату публікацыі ў тэкст не пішы" in prompts.GENERATE_TASK
+    assert "хто, калі" not in prompts.GENERATE_TASK
+
+
+@needs_node
+def test_names_convert_to_be():
+    # write → конвертер (с guard-словарём, как в пайплайне) → be. Разошлось —
+    # список имён врёт о том, что увидит читатель
+    try:
+        site = pipeline.site_repo()
+    except SystemExit:
+        pytest.skip("нет репозитория сайта")
+    c = site / "claude"
+    entries = json.loads((c / "ai-news-names.json").read_text(encoding="utf-8"))["entries"]
+    guards = tarask.Guards.load(c / "ai-news-converter-guards.json")
+    got = [tarask.restore(t) for t in tarask.run_converter([tarask.protect(e["write"], guards) for e in entries])]
+    assert [(e["en"], g) for e, g in zip(entries, got)] == [(e["en"], e["be"]) for e in entries]
