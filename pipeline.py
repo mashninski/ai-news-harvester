@@ -359,7 +359,13 @@ def lint_card(res: Resources, tk: dict) -> list[dict]:
 def process_generated(res: Resources, drafts: dict[str, dict]) -> dict[str, dict]:
     """Сгенерированное наркамаўкай → тарашкевіца → линтер. drafts: hash → поля.
     Возвращает hash → payload (nk, tk, flagged, notes)."""
-    out = {}
+    out, fixed = {}, {}
+    # Механика (латинская буква в слове, «2$», «42.92%») — кодом, до конвертера
+    for h, nk in drafts.items():
+        fixed[h] = []
+        for f in FIELDS:
+            nk[f], changes = lint.normalize(nk[f])
+            fixed[h] += [{"kind": "аўтавыпраўленьне", "detail": f"{f}: {c}"} for c in changes]
     order = [(h, f) for h in drafts for f in FIELDS]
     converted = tarask.convert([drafts[h][f] for h, f in order], res.guards)
     tk_all = {}
@@ -367,7 +373,7 @@ def process_generated(res: Resources, drafts: dict[str, dict]) -> dict[str, dict
         tk_all.setdefault(h, {})[f] = text
     for h, nk in drafts.items():
         tk = tk_all[h]
-        notes = []
+        notes = fixed[h]
         for f in FIELDS:
             for n in tarask.suspicious_changes(nk[f], tk[f], res.guards):
                 notes.append({"kind": "канвертар", "detail": f"{f}: «{n['before']}» → «{n['after']}» ({n['kind']})"})
@@ -437,7 +443,9 @@ def apply_fixes(res: Resources, p: dict, fixes: list[dict]) -> dict:
     """Исправленные предложения (наркамаўка) → конвертер → на место в тексте."""
     by_n = {f["n"]: f for f in fixes}
     todo = [fl for fl in p["flagged"] if "n" in fl and fl["n"] in by_n and by_n[fl["n"]]["changed"]]
-    converted = tarask.convert([by_n[fl["n"]]["sentence"].strip() for fl in todo], res.guards)
+    for fl in todo:
+        by_n[fl["n"]]["sentence"], _ = lint.normalize(by_n[fl["n"]]["sentence"].strip())
+    converted = tarask.convert([by_n[fl["n"]]["sentence"] for fl in todo], res.guards)
     nk = {f: lint.split_paragraphs(p["nk"][f]) for f in FIELDS}
     tk = {f: lint.split_paragraphs(p["tk"][f]) for f in FIELDS}
     for fl, conv in zip(todo, converted):

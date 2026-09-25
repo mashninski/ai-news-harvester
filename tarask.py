@@ -120,10 +120,27 @@ def run_converter(texts: list[str]) -> list[str]:
     return out
 
 
+# Предлог «у/ў» сразу после маркера термина или имени. Конвертер сам ставит «ў»
+# после гласной, но между словом и предлогом у нас стоит «}}», и предыдущего
+# слова он не видит: «{{term:…|раунд фінансавання}} у гісторыі» оставалось
+# с «у» (прогон на корпусе 24.09.2026, 2 правки судьи). Это не своё правило
+# тарашкевіцы вместо конвертера, а то же правило «у/ў», которое он применил бы
+# без нашего маркера, — и только на стыке с маркером.
+_VOWELS = set("аеёіоуыэюяАЕЁІОУЫЭЮЯ")
+MARKER_U_RE = re.compile(r"([^\W\d_])\}\}(\s+)[уў](?=\s)")
+
+
+def fix_u_after_markers(text: str) -> str:
+    def repl(m):
+        u = "ў" if m.group(1) in _VOWELS else "у"
+        return f"{m.group(1)}}}}}{m.group(2)}{u}"
+    return MARKER_U_RE.sub(repl, text)
+
+
 def convert(texts: list[str], guards: Guards | None = None) -> list[str]:
     """Наркамаўка → тарашкевіца с guard-маркерами. Маркеры {{name:…}} остаются —
     их снимает strip_names после проверки."""
-    return [restore(t) for t in run_converter([protect(t, guards) for t in texts])]
+    return [fix_u_after_markers(restore(t)) for t in run_converter([protect(t, guards) for t in texts])]
 
 
 def strip_names(text: str) -> str:

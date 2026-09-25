@@ -112,6 +112,35 @@ def test_lint_does_not_catch_neighbour_words(linter):
     assert found(linter, "Гэта зьяўленьне новых мадэляў.") == []
 
 
+def test_lint_verb_noun_phrase_in_any_order(linter):
+    assert found(linter, "Кампанія прыняла актыўны ўдзел.")[0][1] == "прыняць удзел"
+    assert found(linter, "Раунд вялі яны, а ўдзел у ім таксама прынялі іншыя.")[0][1] == "прыняць удзел"
+    assert found(linter, "Удзел — гэта не прыняць рашэньне.") == []   # через тире не тянется
+
+
+def test_lint_builtin_alphabet_rules(linter):
+    assert [a for _, a in found(linter, "зваротнай транскриптазы")] == ["и / щ / ъ"]
+    assert [a for _, a in found(linter, "перавышала лімit")] == ["лацінка ўнутры кірылічнага слова"]
+    # Слаг термина латиницей рядом с кириллицей — не смесь
+    assert found(linter, "прайшла {{term:fine-tuning|файн-цюнінг}} на GPT-5.") == []
+
+
+def test_normalize_fixes_mechanics_but_not_versions():
+    text, changes = lint.normalize("Ліміт — лімiт, 42.92% і 39.0 %, 2$ і 0.10 $, GPT-5.6, Opus 5.5, Gemini 3.8 TTS.")
+    assert text == "Ліміт — ліміт, 42,92% і 39,0 %, 2 $ і 0,10 $, GPT-5.6, Opus 5.5, Gemini 3.8 TTS."
+    assert len(changes) == 3
+
+
+@needs_node
+def test_u_after_marker_follows_previous_word():
+    # «}}» закрывает конвертеру предыдущее слово — «ў» ставим сами, тем же правилом
+    out = tarask.convert(["найбольшы {{term:funding-round|раунд фінансавання}} у гісторыі",
+                          "{{name:Дэміс Хасабіс}} ў сваім эсэ", "пра {{term:x|мадэлі}} ураду"])
+    assert out[0].endswith("фінансаваньня}} ў гісторыі")
+    assert out[1] == "{{name:Дэміс Хасабіс}} у сваім эсэ"      # после согласной — «у»
+    assert out[2] == "пра {{term:x|мадэлі}} ураду"              # начало слова не трогаем
+
+
 def test_split_keeps_versions_quotes_and_paragraphs():
     t = "Выйшла Opus 5.5. Яна «лепшая.» Далей.\n\nДругі абзац."
     paras = lint.split_paragraphs(t)
