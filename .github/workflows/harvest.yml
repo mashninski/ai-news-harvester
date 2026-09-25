@@ -1,0 +1,151 @@
+# Этап 7 плана: коллектор → пайплайн → публикация, раз в 2 часа.
+#
+# Batch API асинхронный: прогон N отправляет батч, прогон N+1 его забирает
+# и отправляет следующий шаг. Поэтому между прогонами должно жить состояние —
+# data/state.sqlite (что уже видели, незабранные батчи, что ушло в PR) и
+# output/cards (черновики, которые ещё не попали в PR). Живёт оно в
+# actions/cache, а не в git: почему — журнал сайта, 25.09.2026, этап 7.
+#
+# Платная часть (пайплайн и публикация) выключена, пока переменная
+# репозитория AI_NEWS_PIPELINE не равна «on» (Settings → Secrets and
+# variables → Actions → Variables). Коллектор бесплатный и работает всегда.
+
+name: harvest
+
+on:
+  schedule:
+    # Минута 17, а не 0: на ровный час в Actions очередь, прогон опаздывает
+    - cron: "17 */2 * * *"
+  workflow_dispatch:
+    inputs:
+      cold_start:
+        description: "Кэша состояния нет — всё равно запускать пайплайн с пустым состоянием"
+        type: boolean
+        default: false
+
+# Два прогона одновременно прочитали бы одно состояние, и сохранился бы
+# только последний: отправленный первым батч потерялся бы вместе с оплатой
+concurrency:
+  group: harvest
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  PIPELINE: ${{ vars.AI_NEWS_PIPELINE }}
+  # Ветка сайта, откуда берутся глоссарий и словари и куда открывается PR.
+  # До запуска раздела (этап 8) — naviny-test: main фронта /naviny не содержит
+  SITE_BRANCH: ${{ vars.AI_NEWS_SITE_BRANCH || 'naviny-test' }}
+
+jobs:
+  harvest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - run: pip install -r requirements.txt
+
+      - name: Состояние — из кэша
+        id: restore
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            data/state.sqlite*
+            output/cards
+          # Ключ кэша неизменяем, поэтому у каждого прогона свой, а берётся
+          # самый свежий по префиксу
+          key: ai-news-state-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: ai-news-state-
+
+      # Потеря состояния при включённом пайплайне стоит денег: всё за 7 дней
+      # пошло бы в triage и генерацию заново, незабранные батчи пропали бы.
+      # Поэтому не молча с нуля, а красный прогон и письмо
+      - name: Состояние на месте?
+        id: guard
+        env:
+          MATCHED: ${{ steps.restore.outputs.cache-matched-key }}
+          COLD: ${{ inputs.cold_start }}
+        run: |
+          if [[ -n "$MATCHED" ]]; then
+            echo "Состояние из кэша $MATCHED"
+          elif [[ "$PIPELINE" != "on" ]]; then
+            echo "::warning::Кэша состояния нет — коллектор начинает с пустого. Пайплайн выключен, денег это не стоит"
+          elif [[ "$COLD" == "true" ]]; then
+            echo "::warning::Кэша состояния нет — холодный старт по запросу"
+          else
+            echo "::error::Кэша состояния нет, а пайплайн включён. Запуск с пустым состоянием заново отправит в модель всё за 7 дней. Если так и надо — Run workflow с галкой cold_start"
+            exit 1
+          fi
+
+      - name: Коллектор
+        run: python collect.py
+
+      - name: Секреты платной части
+        if: ${{ !cancelled() && env.PIPELINE == 'on' && steps.guard.outcome == 'success' }}
+        env:
+          AI_NEWS_ANTHROPIC_KEY: ${{ secrets.AI_NEWS_ANTHROPIC_KEY }}
+          AI_NEWS_SITE_TOKEN: ${{ secrets.AI_NEWS_SITE_TOKEN }}
+        run: |
+          ok=1
+          [[ -n "$AI_NEWS_ANTHROPIC_KEY" ]] || { echo "::error::Нет секрета AI_NEWS_ANTHROPIC_KEY — ключ Anthropic API"; ok=0; }
+          [[ -n "$AI_NEWS_SITE_TOKEN" ]] || { echo "::error::Нет секрета AI_NEWS_SITE_TOKEN — токен GitHub на mashninski-site"; ok=0; }
+          [[ $ok == 1 ]]
+
+      # Сайт приватный: глоссарий, стайлгайд и словари читаются оттуда тем же
+      # токеном публикации (у него Contents: read), в этот репозиторий не копируются
+      - name: Языковые ресурсы сайта
+        if: ${{ !cancelled() && env.PIPELINE == 'on' && steps.guard.outcome == 'success' }}
+        uses: actions/checkout@v4
+        with:
+          repository: mashninski/mashninski-site
+          ref: ${{ env.SITE_BRANCH }}
+          token: ${{ secrets.AI_NEWS_SITE_TOKEN }}
+          path: site
+          sparse-checkout: claude
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        if: ${{ !cancelled() && env.PIPELINE == 'on' && steps.guard.outcome == 'success' }}
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: tools/taraskevize/package-lock.json
+
+      - name: Конвертер
+        if: ${{ !cancelled() && env.PIPELINE == 'on' && steps.guard.outcome == 'success' }}
+        working-directory: tools/taraskevize
+        run: npm ci
+
+      # !cancelled(), а не success(): упавший коллектор не должен мешать забрать
+      # уже оплаченные батчи прошлого прогона
+      - name: Пайплайн
+        if: ${{ !cancelled() && env.PIPELINE == 'on' && steps.guard.outcome == 'success' }}
+        env:
+          AI_NEWS_ANTHROPIC_KEY: ${{ secrets.AI_NEWS_ANTHROPIC_KEY }}
+          AI_NEWS_SITE_REPO: ${{ github.workspace }}/site
+        run: python pipeline.py
+
+      - name: Публикация
+        if: ${{ !cancelled() && env.PIPELINE == 'on' && steps.guard.outcome == 'success' }}
+        env:
+          AI_NEWS_SITE_TOKEN: ${{ secrets.AI_NEWS_SITE_TOKEN }}
+        run: python publish.py --base "$SITE_BRANCH"
+
+      # always(): состояние сохраняется и после упавшего шага — иначе батч,
+      # отправленный до падения, был бы оплачен и потерян. Но не после
+      # проваленной проверки состояния: пустой файл затёр бы настоящий кэш
+      - name: Состояние — в кэш
+        if: ${{ always() && steps.guard.outcome == 'success' && hashFiles('data/state.sqlite') != '' }}
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            data/state.sqlite*
+            output/cards
+          key: ai-news-state-${{ github.run_id }}-${{ github.run_attempt }}

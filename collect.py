@@ -196,12 +196,17 @@ def fetch_rss(source: dict, is_seen, cutoff: datetime) -> list[Item]:
         link, title = e.get("link"), (e.get("title") or "").strip()
         if not link or not title:
             continue
-        parsed = e.get("published_parsed") or e.get("updated_parsed")
-        published = iso(datetime.fromtimestamp(calendar.timegm(parsed), timezone.utc)) if parsed else None
-        # content:encoded (или atom content), если есть, — он полнее summary
-        content = e.get("content") or []
-        body_html = content[0].get("value", "") if content else e.get("summary", "")
-        items.append(Item(source["id"], clean_url(link), published, title, html_to_text(body_html)))
+        try:
+            parsed = e.get("published_parsed") or e.get("updated_parsed")
+            published = iso(datetime.fromtimestamp(calendar.timegm(parsed), timezone.utc)) if parsed else None
+            # content:encoded (или atom content), если есть, — он полнее summary
+            content = e.get("content") or []
+            body_html = content[0].get("value", "") if content else e.get("summary", "")
+            items.append(Item(source["id"], clean_url(link), published, title, html_to_text(body_html)))
+        except Exception as ex:
+            # Одна кривая запись (ссылка «http://[…», дата за пределами календаря)
+            # не должна уносить с собой весь источник
+            log.warning("%s: пропущена запись %r — %s: %s", source["id"], link, type(ex).__name__, ex)
     return items
 
 
@@ -277,10 +282,15 @@ def fetch_sitemap(source: dict, is_seen, cutoff: datetime) -> list[Item]:
 
     fresh, stale = [], []
     for loc, lastmod in sitemap_urls(source["url"]):
-        parts = urlsplit(loc)
-        if parts.netloc != base.netloc or not NEWS_PATH.match(parts.path.rstrip("/")):
+        try:
+            parts = urlsplit(loc)
+            if parts.netloc != base.netloc or not NEWS_PATH.match(parts.path.rstrip("/")):
+                continue
+            url = clean_url(loc)
+        except ValueError as ex:
+            # Кривой адрес в sitemap — пропускаем его, а не весь sitemap
+            log.warning("%s: пропущен адрес %r — %s", source["id"], loc, ex)
             continue
-        url = clean_url(loc)
         if is_seen(url_hash(url)):
             continue
         mod = parse_iso(lastmod)
@@ -572,6 +582,16 @@ def main():
             "late_duplicates": [{**asdict(d), "primary_hash": p.hash} for d, p in res.late],
         }
         Path(args.json).write_text(json.dumps(out, ensure_ascii=False, indent=2), encoding="utf-8")
+    if all_failed(res):
+        # Один-два упавших источника — штатно (VentureBeat падает каждый прогон).
+        # Упали все — это уже не битый фид, а сеть или сам коллектор: код 1, чтобы
+        # воркфлоу покраснел и пришло письмо, а не «успешный» прогон с нулём новостей
+        print("НИ ОДИН ИСТОЧНИК НЕ ОТВЕТИЛ", file=sys.stderr)
+        sys.exit(1)
+
+
+def all_failed(res: Result, sources=SOURCES) -> bool:
+    return len(res.failed) >= len(sources)
 
 
 if __name__ == "__main__":

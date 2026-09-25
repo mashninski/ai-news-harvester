@@ -134,6 +134,27 @@ def test_broken_sources_are_skipped_not_fatal(db, monkeypatch, caplog):
     collect.print_result(res)   # и печать отчёта не падает
 
 
+def test_bad_entry_skips_only_itself(db, monkeypatch, caplog):
+    # Ссылка, на которой падает urlsplit, раньше уносила весь источник
+    bad = (b"<item><title>Bad link</title><link>http://[bad/x</link>"
+           b"<pubDate>Thu, 24 Sep 2026 10:00:00 +0000</pubDate></item>")
+    net = FakeNet(patch={TECHCRUNCH["url"]: lambda d: d.replace(b"<item>", bad + b"<item>", 1)})
+    with caplog.at_level(logging.WARNING, logger="harvester"):
+        res, _ = run(db, monkeypatch, [TECHCRUNCH], net)
+    assert res.failed == {}
+    assert len(res.new) == 2
+    assert any("пропущена запись" in r.message for r in caplog.records)
+
+
+def test_all_sources_failed_is_an_error(db, monkeypatch):
+    net = FakeNet(errors={s["url"]: requests.ConnectionError("no network") for s in (OPENAI, TECHCRUNCH)})
+    res, _ = run(db, monkeypatch, [OPENAI, TECHCRUNCH], net)
+    assert collect.all_failed(res, [OPENAI, TECHCRUNCH])
+    # Один упавший из двух — штатно, не ошибка прогона
+    res, _ = run(db, monkeypatch, [OPENAI, TECHCRUNCH], FakeNet(errors={OPENAI["url"]: requests.Timeout("t")}))
+    assert not collect.all_failed(res, [OPENAI, TECHCRUNCH])
+
+
 def test_broken_sitemap_is_skipped(db, monkeypatch):
     net = FakeNet(patch={"https://www.anthropic.com/sitemap-news.xml": lambda d: d[:120]})
     res, _ = run(db, monkeypatch, [ANTHROPIC, OPENAI], net)
