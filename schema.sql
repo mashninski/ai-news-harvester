@@ -63,3 +63,18 @@ CREATE TABLE IF NOT EXISTS item (
 );
 
 CREATE INDEX IF NOT EXISTS item_stage ON item(stage);
+
+-- ---------- Публикация (этап 5) ----------
+
+-- Какие карточки уже ушли в PR сайта (publish.py). Одна строка на карточку:
+-- предложенная не предлагается второй раз — ни принятая, ни отклонённая
+-- (отклонить = удалить файл в PR). skipped — не вошла в PR по проверке,
+-- причина в reason и в описании того PR, где об этом сказано.
+CREATE TABLE IF NOT EXISTS publication (
+    hash         TEXT PRIMARY KEY,
+    status       TEXT NOT NULL CHECK (status IN ('proposed', 'skipped')),
+    pr           INTEGER,            -- номер PR в mashninski-site
+    branch       TEXT,
+    reason       TEXT,
+    at           TEXT NOT NULL
+);
