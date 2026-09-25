@@ -107,7 +107,12 @@ def card_path(card_id: str) -> str:
 def check(card: dict) -> tuple[list[str], list[dict]]:
     """(почему карточку нельзя в PR, заметки для ревью). Первое — то, что правкой
     слова в дифе не исправить или что сломает сайт: оборванный текст, дата, id.
-    Второе — то, что ревьюер поправит сам."""
+    Второе — то, что ревьюер поправит сам.
+
+    Копия на TypeScript — в репозитории сайта, src/lib/naviny.ts (publishCheck):
+    ею дашборд проверяет правку опубликованной карточки перед коммитом в main.
+    Меняешь правило или текст сообщения здесь — меняй и там; расхождение ловит
+    test_check_same_as_site_dashboard."""
     fatal, notes = [], []
     if not ID_RE.match(str(card.get("id", ""))):
         fatal.append(f"id не sha1: `{str(card.get('id'))[:50]}`")

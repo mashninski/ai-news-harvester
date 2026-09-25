@@ -4,7 +4,11 @@
 в приватном репозитории сайта и сюда не копируются."""
 
 import json
+import os
+import shutil
+import subprocess
 from datetime import datetime, timezone
+from pathlib import Path
 from types import SimpleNamespace as NS
 
 import pytest
@@ -261,3 +265,64 @@ def test_published_ids_from_tree_and_missing_folder():
 def test_missing_base_branch_is_an_error():
     with pytest.raises(publish.GitHubError, match="ветки nope нет"):
         publish.GitHub("o/r", "t", FakeSession({})).head("nope")
+
+
+# ---------- та же проверка в дашборде сайта ----------
+# check() и paragraphs() повторены на TypeScript в репозитории сайта
+# (src/lib/naviny.ts: publishCheck, paragraphs) — ими дашборд проверяет
+# правку уже опубликованной карточки перед коммитом в main. Тест гоняет
+# одни и те же карточки через обе копии и требует одинаковый ответ,
+# до буквы: две копии правил не разойдутся молча.
+
+SITE_NAVINY_TS = (Path(os.environ.get("AI_NEWS_SITE_REPO") or publish.ROOT.parent / "mashninski-site")
+                  / "src" / "lib" / "naviny.ts")
+
+
+def _node_runs_ts() -> bool:
+    if shutil.which("node") is None or not SITE_NAVINY_TS.exists():
+        return False
+    probe = subprocess.run(["node", "--experimental-strip-types", "--no-warnings",
+                            "--input-type=module-typescript", "-e", "const x: number = 1"], capture_output=True)
+    return probe.returncode == 0
+
+
+needs_site_ts = pytest.mark.skipif(not _node_runs_ts(),
+                                   reason="нет репозитория сайта рядом или node без поддержки TypeScript (нужен 22.6+)")
+
+PARITY_CASES = [
+    card(),
+    card(retelling="Абзац. Gemini Robotics ER 2 працуе як"),
+    card(published_at="2026-09T12:00:00Z"),
+    card(published_at="2026-09"),
+    card(published_at="2026-09-22 12:00"),
+    card(id="../../src/app/page"),
+    card(summary=""),
+    card(be_title="   "),
+    card(sources=[]),
+    card(sources=[{"source": "x", "url": "javascript:alert(1)"}]),
+    card(importance=0),
+    card(vendor=None),
+    card(thesis="Тэзіс без кропкі",
+         retelling='Абзац.\n\nПра рэжым "max" і <!-- guard -->SVG.\n\n{{name:Саймон Ўілісан}} сказаў.'),
+    card(thesis="Тэзіс пра {{term:token|токены} без дужкі.", summary="Цытата: «так».)"),
+    card(summary="Канец з цытатай.»", retelling="Абзац з <!-- незакрытым камэнтаром."),
+]
+
+
+@needs_site_ts
+def test_check_same_as_site_dashboard(tmp_path):
+    script = tmp_path / "parity.mts"
+    script.write_text(
+        f'import {{ publishCheck, paragraphs }} from {json.dumps(SITE_NAVINY_TS.as_uri())};\n'
+        'import fs from "node:fs";\n'
+        'const cases = JSON.parse(fs.readFileSync(0, "utf8"));\n'
+        'console.log(JSON.stringify(cases.map((c) => ({ ...publishCheck(c), paragraphs: paragraphs(c.retelling) }))));\n',
+        encoding="utf-8")
+    out = subprocess.run(["node", "--experimental-strip-types", "--no-warnings", str(script)],
+                         input=json.dumps(PARITY_CASES, ensure_ascii=False), capture_output=True,
+                         text=True, encoding="utf-8", check=True)
+    site = json.loads(out.stdout)
+    for c, got in zip(PARITY_CASES, site):
+        fatal, notes = publish.check(c)
+        assert got == {"fatal": fatal, "notes": [n["detail"] for n in notes],
+                       "paragraphs": publish.paragraphs(c["retelling"])}, c
