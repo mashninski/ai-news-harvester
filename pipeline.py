@@ -389,6 +389,11 @@ def on_generate(db, res, results, acc):
         if err:
             fail_step(db, h, "triaged", err)
             continue
+        cut = [f for f in FIELDS if f != "be_title" and lint.truncated(data[f])]
+        if cut:
+            # Обрыв не чинится ни конвертером, ни fix — только новой генерацией
+            fail_step(db, h, "triaged", f"тэкст абарваны: {', '.join(cut)}")
+            continue
         term_notes[h] = []
         nk = {f: check_terms(data[f].strip(), res.slugs, term_notes[h]) for f in FIELDS}
         # В заголовке маркеров быть не должно — если модель всё же поставила, снимаем

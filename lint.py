@@ -118,6 +118,22 @@ LOOKALIKE = str.maketrans("aceiopxyACEHIKMOPTXY", "асеіорхуАСЕНІК�
 WORD_RE = re.compile(r"[^\W\d_]+")
 CYR, LAT = re.compile(r"[а-яёіўэА-ЯЁІЎЭ]"), re.compile(r"[A-Za-z]")
 MONEY_SPACE_RE = re.compile(r"(\d)([$€£])")
+# Служебный комментарий в тексте: стайлгайд до 25.09.2026 велел помечать им
+# место для guard-маркера, и модель так и писала — «<!-- guard -->» доехал до
+# карточки (прогон на корпусе 25.09.2026)
+COMMENT_RE = re.compile(r"\s*<!--.*?-->\s*")
+# Прямые кавычки парой: «"max"» → «max». Только пара внутри одного предложения
+# и без кавычек внутри, иначе не угадать, где открывающая
+STRAIGHT_QUOTES_RE = re.compile(r'(?<![\w"])"([^"\n]+?)"(?![\w"])')
+# Текст должен заканчиваться концом предложения. Без него — обрыв: на корпусе
+# 25.09.2026 модель поставила прямую кавычку перед цитатой, JSON-схема приняла
+# её за конец поля, и пересказ кончился на «працуе як»
+TERMINAL_RE = re.compile(r"[.!?…][»\"”)]*\s*$")
+
+
+def truncated(text: str) -> bool:
+    """Поле кончается не концом предложения — модель оборвала текст."""
+    return bool(text.strip()) and not TERMINAL_RE.search(text.strip())
 DECIMAL_RE = re.compile(r"(?<![\w.\-])(\d+)\.(\d+)(?=\s?[%$€£])")
 
 
@@ -136,7 +152,12 @@ def normalize(text: str) -> tuple[str, list[str]]:
         return w
 
     text = WORD_RE.sub(mixed, text)
-    for rx, rep, what in ((MONEY_SPACE_RE, r"\1 \2", "знак валюты праз прабел"),
+    new = COMMENT_RE.sub(lambda m: " " if m.start() and m.end() < len(text) else "", text)
+    if new != text:
+        changes.append("выдалены службовы каментар <!-- -->")
+        text = new
+    for rx, rep, what in ((STRAIGHT_QUOTES_RE, r"«\1»", "простыя двукоссі → «ёлачкі»"),
+                          (MONEY_SPACE_RE, r"\1 \2", "знак валюты праз прабел"),
                           (DECIMAL_RE, r"\1,\2", "дзесятковая коска")):
         new = rx.sub(rep, text)
         if new != text:

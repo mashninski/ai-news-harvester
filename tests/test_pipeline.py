@@ -141,6 +141,38 @@ def test_normalize_fixes_mechanics_but_not_versions():
 
 
 @needs_node
+def test_normalize_quotes_and_comments():
+    text, changes = lint.normalize('Рэжым "max" — пры генерацыі <!-- guard -->SVG-малюнка, 5" экран.')
+    assert text == "Рэжым «max» — пры генерацыі SVG-малюнка, 5\" экран."
+    assert len(changes) == 2
+
+
+def test_truncated_text_is_detected():
+    assert lint.truncated("Gemini Robotics ER 2 працуе як")
+    assert lint.truncated("адна кіруе целам, другая выконвае ролю")
+    assert not lint.truncated("Мадэль выйшла. Цяпер «так».")
+    assert not lint.truncated("Хто гэта?\n\nНевядома…")
+
+
+@needs_node
+def test_truncated_generation_goes_back(tmp_path, site, monkeypatch):
+    monkeypatch.setattr(pipeline, "CARDS_DIR", tmp_path / "cards")
+    db = collect.open_state(tmp_path / "state.sqlite")
+    h0, h1, h2 = seed(db)
+
+    def cut(stage, params):
+        a = answers(stage, params)
+        if stage == "generate" and "Title 1" in params["messages"][0]["content"]:
+            a["retelling"] = "Мадэль найбольшая. Яна працуе як"
+        return a
+    client = fake_client(cut)
+    for _ in range(3):
+        pipeline.run_once(db, client, pipeline.Resources(site), limit=10)
+    stage, error = db.execute("SELECT stage, error FROM item WHERE hash = ?", (h1,)).fetchone()
+    assert stage in ("triaged", "generate_sent") and "абарваны: retelling" in error
+    assert not (tmp_path / "cards" / f"{h1}.json").exists()
+
+
 def test_u_after_marker_follows_previous_word():
     # «}}» закрывает конвертеру предыдущее слово — «ў» ставим сами, тем же правилом
     out = tarask.convert(["найбольшы {{term:funding-round|раунд фінансавання}} у гісторыі",
