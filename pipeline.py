@@ -423,9 +423,27 @@ def generate_request(res: Resources, m: dict) -> dict:
     }}
 
 
+def expire_triaged(db, now: datetime) -> int:
+    """Ждущее генерации дольше окна свежести — too_old. При потолке генераций
+    в сутки отобранного triage бывает больше, чем успевает генерация, и хвост
+    очереди иначе дождался бы своей карточки через неделю."""
+    cutoff = collect.iso(now - timedelta(days=collect.MAX_AGE_DAYS))
+    rows = db.execute("SELECT i.hash FROM item i JOIN seen s ON s.hash = i.hash WHERE i.stage = 'triaged'"
+                      " AND COALESCE(s.published_at, s.first_seen_at) < ?", (cutoff,)).fetchall()
+    for (h,) in rows:
+        set_stage(db, h, "too_old")
+        forget_body(db, h)
+    db.commit()
+    return len(rows)
+
+
 def submit_generate(db, client, res: Resources, limit: int = MAX_GENERATE_PER_RUN) -> str | None:
-    rows = db.execute("SELECT hash FROM item WHERE stage = 'triaged'"
-                      " ORDER BY importance DESC, updated_at LIMIT ?", (limit,)).fetchall()
+    # Самые важные первыми, внутри важности — самые свежие: потолок генераций
+    # в сутки (MAX_GENERATE_PER_DAY) меньше, чем triage отбирает, и «старые
+    # первыми» превратили бы ленту в новости недельной давности
+    rows = db.execute("SELECT i.hash FROM item i JOIN seen s ON s.hash = i.hash WHERE i.stage = 'triaged'"
+                      " ORDER BY i.importance DESC, COALESCE(s.published_at, s.first_seen_at) DESC, i.updated_at"
+                      " LIMIT ?", (limit,)).fetchall()
     reqs, hashes = [], []
     for (h,) in rows:
         m = material(db, h)
@@ -662,6 +680,7 @@ def run_once(db, client, res: Resources, limit: int = MAX_GENERATE_PER_RUN,
     now = now or datetime.now(timezone.utc)
     pending = collect_batches(db, client, res)
     enroll_new(db, now)
+    expire_triaged(db, now)
     b = budget_state(db, now)
     if b["exhausted"]:
         # Готовое уже забрано выше, черновики дойдут до публикации; новых трат нет

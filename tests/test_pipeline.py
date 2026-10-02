@@ -589,3 +589,23 @@ def test_status_prints_month_budget_and_day(tmp_path, monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "потрачено ≈ $0.3000 (оценка ×1.5) из $8.00" in out
     assert "осталось ≈ $7.7000" in out and "за сутки по Мінску: 4 из 10" in out
+
+
+def test_generation_takes_important_then_freshest_and_expires_stale(tmp_path, site, monkeypatch):
+    monkeypatch.delenv(pipeline.BUDGET_ENV, raising=False)
+    db = collect.open_state(tmp_path / "state.sqlite")
+    hs = triaged(db, 4)
+    when = {hs[0]: "2026-09-27T10:00:00Z",   # важность 2, 5 дней назад
+            hs[1]: "2026-10-02T10:00:00Z",   # важность 2, свежая
+            hs[2]: "2026-09-28T10:00:00Z",   # важность 3, старше свежей
+            hs[3]: "2026-09-24T10:00:00Z"}   # старше окна свежести — в генерацию не идёт
+    for h, pub in when.items():
+        db.execute("UPDATE seen SET published_at = ? WHERE hash = ?", (pub, h))
+    db.execute("UPDATE item SET importance = 3 WHERE hash = ?", (hs[2],))
+    db.commit()
+    client = fake_client(answers)
+    pipeline.run_once(db, client, pipeline.Resources(site, "narkamauka"), limit=2, now=NOW)
+    sent = [r["custom_id"][2:] for r in client.messages.batches.store["msgbatch_0"]["requests"]]
+    assert sent == [hs[2], hs[1]]
+    stages = dict(db.execute("SELECT hash, stage FROM item"))
+    assert stages[hs[0]] == "triaged" and stages[hs[3]] == "too_old"
