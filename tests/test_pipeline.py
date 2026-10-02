@@ -472,3 +472,120 @@ def test_names_convert_to_be():
     guards = tarask.Guards.load(c / "ai-news-converter-guards.json")
     got = [tarask.restore(t) for t in tarask.run_converter([tarask.protect(e["write"], guards) for e in entries])]
     assert [(e["en"], g) for e, g in zip(entries, got)] == [(e["en"], e["be"]) for e in entries]
+
+
+# ---------- предохранители бюджета ----------
+
+def triaged(db, n):
+    """n материалов, уже прошедших triage, — ждут генерации. Адреса не повторяются
+    между вызовами."""
+    start = db.execute("SELECT COUNT(*) FROM seen").fetchone()[0]
+    stamp = pipeline.now_iso()
+    hashes = []
+    for i in range(start, start + n):
+        url = f"https://example.com/news/{i}"
+        h = collect.url_hash(url)
+        hashes.append(h)
+        db.execute("INSERT INTO seen (hash, url, source, title, published_at, first_seen_at, status)"
+                   " VALUES (?, ?, 'openai', ?, ?, ?, 'new')", (h, url, f"Title {i}", stamp, stamp))
+        db.execute("INSERT INTO article (hash, body) VALUES (?, ?)", (h, "Some body text. " * 40))
+    for h in hashes:
+        db.execute("INSERT INTO item (hash, stage, category, vendor, importance, updated_at)"
+                   " VALUES (?, 'triaged', 'product', 'openai', 2, ?)", (h, pipeline.now_iso()))
+    db.commit()
+    return hashes
+
+
+def past_batch(db, bid, stage, requests, submitted_at, usd=None):
+    usage = None if usd is None else json.dumps({"tokens": {}, "usd": usd})
+    db.execute("INSERT INTO batch (id, stage, requests, submitted_at, collected_at, usage)"
+               " VALUES (?, ?, ?, ?, ?, ?)", (bid, stage, requests, submitted_at, submitted_at, usage))
+    db.commit()
+
+
+def generate_requests(client):
+    b = client.messages.batches
+    return [len(b.store[i]["requests"]) for i in b.created
+            if b.store[i]["requests"][0]["custom_id"].startswith("g-")]
+
+
+NOW = collect.parse_iso("2026-10-02T21:30:00Z")   # 00:30 3 кастрычніка па Мінску
+
+
+def test_generation_capped_per_run(tmp_path, site, monkeypatch):
+    monkeypatch.delenv(pipeline.BUDGET_ENV, raising=False)
+    db = collect.open_state(tmp_path / "state.sqlite")
+    triaged(db, 8)
+    client = fake_client(answers)
+    pipeline.run_once(db, client, pipeline.Resources(site, "narkamauka"), now=NOW)
+    assert generate_requests(client) == [pipeline.MAX_GENERATE_PER_RUN] == [5]
+    # Тот же процесс (--wait) второй раз за запуск не генерирует
+    started = collect.iso(NOW)
+    db.execute("UPDATE batch SET submitted_at = ?", (started,))
+    pipeline.run_once(db, client, pipeline.Resources(site, "narkamauka"), now=NOW, run_started=started)
+    assert generate_requests(client) == [5]
+
+
+def test_generation_capped_per_minsk_day(tmp_path, site, monkeypatch):
+    monkeypatch.delenv(pipeline.BUDGET_ENV, raising=False)
+    db = collect.open_state(tmp_path / "state.sqlite")
+    triaged(db, 8)
+    # 23:00 2 кастрычніка па Мінску — учорашнія суткі, не лічацца
+    past_batch(db, "old", "generate", 9, "2026-10-02T20:00:00Z", 0.1)
+    # 00:10 3 кастрычніка па Мінску — сённяшнія: 8 з 10
+    past_batch(db, "today", "generate", 8, "2026-10-02T21:10:00Z", 0.1)
+    past_batch(db, "tri", "triage", 50, "2026-10-02T21:10:00Z", 0.01)   # triage у потолок не идёт
+    client = fake_client(answers)
+    res = pipeline.Resources(site, "narkamauka")
+    pipeline.run_once(db, client, res, now=NOW)
+    assert generate_requests(client) == [2]
+    assert pipeline.budget_state(db, NOW)["today"] == 10
+    pipeline.run_once(db, client, res, now=NOW)                      # потолок суток — больше ничего
+    assert generate_requests(client) == [2]
+    assert db.execute("SELECT COUNT(*) FROM item WHERE stage = 'triaged'").fetchone()[0] == 6
+
+
+def test_monthly_budget_stops_new_batches_but_collects_ready(tmp_path, site, monkeypatch, capsys):
+    monkeypatch.delenv(pipeline.BUDGET_ENV, raising=False)
+    summary = tmp_path / "summary.md"
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary))
+    monkeypatch.setattr(pipeline, "CARDS_DIR", tmp_path / "cards")
+    db = collect.open_state(tmp_path / "state.sqlite")
+    past_batch(db, "sept", "generate", 10, "2026-09-25T12:00:00Z", 100.0)   # прошлы месяц не лічыцца
+    past_batch(db, "oct", "generate", 10, "2026-10-01T12:00:00Z", 5.0)      # 5 × 1,5 = 7,5 < 8
+    triaged(db, 3)
+    client = fake_client(answers)
+    res = pipeline.Resources(site, "narkamauka")
+    pipeline.run_once(db, client, res, now=NOW)
+    assert generate_requests(client) == [3]                    # бюджет ещё есть
+    # Отправленный батч забирается и в нём ещё $0,40: 5,4 × 1,5 = 8,1 ≥ 8
+    db.execute("UPDATE batch SET usage = ? WHERE id = 'oct'", (json.dumps({"tokens": {}, "usd": 5.4}),))
+    seed_more = triaged(db, 2)
+    pipeline.run_once(db, client, res, now=NOW)
+    assert generate_requests(client) == [3]                    # новых батчей нет
+    # Готовые забраны: два чистых — черновики, третий (с калькай) ждёт fix — fix тоже не отправлен
+    assert len(list((tmp_path / "cards").glob("*.json"))) == 2
+    assert db.execute("SELECT COUNT(*) FROM item WHERE stage = 'linted'").fetchone()[0] == 1
+    assert db.execute("SELECT COUNT(*) FROM item WHERE stage = 'triaged'").fetchone()[0] == len(seed_more)
+    out = capsys.readouterr().out
+    assert "Бюджет месяца исчерпан" in out
+    assert "Бюджет месяца исчерпан" in summary.read_text(encoding="utf-8")
+    b = pipeline.budget_state(db, NOW)
+    assert b["exhausted"] and b["left"] == 0
+    # Бюджет из переменной: $20 — генерация снова идёт
+    monkeypatch.setenv(pipeline.BUDGET_ENV, "20")
+    assert not pipeline.budget_state(db, NOW)["exhausted"]
+    monkeypatch.setenv(pipeline.BUDGET_ENV, "восем")
+    with pytest.raises(SystemExit):
+        pipeline.monthly_budget()
+
+
+def test_status_prints_month_budget_and_day(tmp_path, monkeypatch, capsys):
+    monkeypatch.delenv(pipeline.BUDGET_ENV, raising=False)
+    db = collect.open_state(tmp_path / "state.sqlite")
+    past_batch(db, "a", "generate", 4, "2026-10-02T21:10:00Z", 0.2)
+    past_batch(db, "b", "triage", 30, "2026-09-30T10:00:00Z", 1.0)        # верасень
+    pipeline.status(db, NOW)
+    out = capsys.readouterr().out
+    assert "потрачено ≈ $0.3000 (оценка ×1.5) из $8.00" in out
+    assert "осталось ≈ $7.7000" in out and "за сутки по Мінску: 4 из 10" in out

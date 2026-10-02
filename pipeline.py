@@ -24,7 +24,13 @@ Batch API асинхронный: отправленное сегодня при
 
     python pipeline.py            # один проход: забрать готовое, отправить новое
     python pipeline.py --wait     # ходить по кругу, пока все батчи не вернутся
-    python pipeline.py --status   # только показать, что где лежит
+    python pipeline.py --status   # только показать, что где лежит и сколько потрачено
+
+Предохранители бюджета (журнал сайта, 02.10.2026, «Этап 8а»): не больше
+MAX_GENERATE_PER_RUN генераций за запуск и MAX_GENERATE_PER_DAY за сутки
+по Мінску; месячный бюджет AI_NEWS_MONTHLY_BUDGET_USD (по умолчанию $8)
+по оценкам таблицы batch ×COST_FACTOR. Бюджет исчерпан — новые батчи не
+отправляются, готовые забираются, выход с кодом 0 и предупреждением.
 
 Ключ — переменная окружения AI_NEWS_ANTHROPIC_KEY (llm.py).
 Орфография карточек — AI_NEWS_ORTHOGRAPHY: narkamauka (по умолчанию) или tarask.
@@ -53,7 +59,16 @@ ROOT = Path(__file__).resolve().parent
 CARDS_DIR = ROOT / "output" / "cards"
 
 MAX_ATTEMPTS = 3            # столько раз этап может не удаться, потом failed
-MAX_GENERATE_PER_RUN = 40   # потолок генераций за запуск: страховка от случайной траты
+MAX_GENERATE_PER_RUN = 5    # потолок генераций за запуск: страховка от случайной траты
+MAX_GENERATE_PER_DAY = 10   # потолок генераций за сутки по Мінску, считается по таблице batch
+# Месячный бюджет API по оценкам пайплайна. На счету $10 и лимит консоли $10/мес
+# (решение автора 02.10.2026), $8 — чтобы до лимита консоли не доходить
+BUDGET_ENV = "AI_NEWS_MONTHLY_BUDGET_USD"
+DEFAULT_MONTHLY_BUDGET = 8.0
+# Оценка usage_cost занижала счёт консоли в 1,6 раза (журнал сайта, 25.09.2026):
+# бюджет сверяется с оценкой ×1,5, а не с голой оценкой
+COST_FACTOR = 1.5
+MINSK = timezone(timedelta(hours=3))   # в Беларуси перевода часов нет
 MIN_BODY_CHARS = 400        # меньше — текста для пересказа мало
 MIN_BODY_ANY = 150          # меньше и докачать нельзя — пересказывать нечего
 # Докачка страницы, когда в фиде мало текста. Только эти источники: у DeepMind
@@ -132,6 +147,67 @@ class Resources:
 
 def now_iso() -> str:
     return collect.iso(datetime.now(timezone.utc))
+
+
+# ---------- бюджет ----------
+
+def monthly_budget() -> float:
+    raw = (os.environ.get(BUDGET_ENV) or "").strip().replace(",", ".")
+    if not raw:
+        return DEFAULT_MONTHLY_BUDGET
+    try:
+        value = float(raw)
+    except ValueError:
+        raise SystemExit(f"{BUDGET_ENV}={raw!r}: патрэбны лік у доларах, напрыклад 8")
+    if value < 0:
+        raise SystemExit(f"{BUDGET_ENV}={raw!r}: бюджэт не можа быць адмоўным")
+    return value
+
+
+def minsk_bounds(now: datetime) -> tuple[str, str]:
+    """Начало суток и календарного месяца по Мінску — в UTC, как в таблице batch."""
+    local = now.astimezone(MINSK)
+    day = local.replace(hour=0, minute=0, second=0, microsecond=0)
+    return collect.iso(day), collect.iso(day.replace(day=1))
+
+
+def generated_since(db, since: str) -> int:
+    """Сколько генераций отправлено с момента since — и удачных, и нет: платим за каждую."""
+    return db.execute("SELECT COALESCE(SUM(requests), 0) FROM batch WHERE stage = 'generate'"
+                      " AND submitted_at >= ?", (since,)).fetchone()[0]
+
+
+def spent_since(db, since: str) -> float:
+    """Оценка в $ по забранным батчам, отправленным с момента since (без ×COST_FACTOR)."""
+    return sum(json.loads(u)["usd"] for (u,) in db.execute(
+        "SELECT usage FROM batch WHERE usage IS NOT NULL AND submitted_at >= ?", (since,)))
+
+
+def budget_state(db, now: datetime) -> dict:
+    day, month = minsk_bounds(now)
+    budget = monthly_budget()
+    spent = spent_since(db, month) * COST_FACTOR
+    return {"budget": budget, "spent": spent, "left": max(0.0, budget - spent),
+            "exhausted": spent >= budget, "today": generated_since(db, day), "month": month}
+
+
+def budget_line(b: dict) -> str:
+    return (f"Бюджет месяца: потрачено ≈ ${b['spent']:.4f} (оценка ×{COST_FACTOR}) из ${b['budget']:.2f},"
+            f" осталось ≈ ${b['left']:.4f}; генераций за сутки по Мінску: {b['today']} из {MAX_GENERATE_PER_DAY}")
+
+
+def announce(text: str, warning: bool = False, echo: bool = True):
+    """Строка в лог и, в Actions, в summary прогона. Предупреждение — ещё и
+    аннотацией ::warning::: видно на странице прогона, но прогон не красный —
+    иначе исчерпанный бюджет слал бы письмо 12 раз в сутки."""
+    if echo:
+        print(text)
+    if warning and os.environ.get("GITHUB_ACTIONS"):
+        print(f"::warning::{text}")
+    summary = os.environ.get("GITHUB_STEP_SUMMARY")
+    if summary:
+        with open(summary, "a", encoding="utf-8") as f:
+            f.write(("**⚠ " + text + "**" if warning else text) + "\n\n")
 
 
 # ---------- состояние ----------
@@ -566,21 +642,41 @@ def finalize(db, h: str, p: dict):
 
 # ---------- прогон ----------
 
-def status(db):
+def status(db, now: datetime | None = None):
+    now = now or datetime.now(timezone.utc)
     print("Материалы по шагам:")
     for stage, n in db.execute("SELECT stage, COUNT(*) FROM item GROUP BY stage ORDER BY stage"):
         print(f"  {stage:14} {n}")
     for bid, stage, sub in db.execute(
             "SELECT id, stage, submitted_at FROM batch WHERE collected_at IS NULL"):
         print(f"  в работе: батч {stage} {bid} с {sub}")
-    spent = sum(json.loads(u)["usd"] for (u,) in db.execute("SELECT usage FROM batch WHERE usage IS NOT NULL"))
-    print(f"Потрачено по забранным батчам: ≈ ${spent:.4f}")
+    print(f"Потрачено по забранным батчам: ≈ ${spent_since(db, ''):.4f} (оценка, за всё время)")
+    print(budget_line(budget_state(db, now)))
 
 
-def run_once(db, client, res: Resources, limit: int) -> int:
+def run_once(db, client, res: Resources, limit: int = MAX_GENERATE_PER_RUN,
+             now: datetime | None = None, run_started: str | None = None) -> int:
+    """Забрать готовое, отправить новое в пределах потолков. run_started — начало
+    процесса: потолок за запуск считается по батчам с этого момента (--wait
+    проходит run_once много раз)."""
+    now = now or datetime.now(timezone.utc)
     pending = collect_batches(db, client, res)
-    enroll_new(db, datetime.now(timezone.utc))
-    for sub in (submit_triage(db, client), submit_generate(db, client, res, limit), submit_fix(db, client, res)):
+    enroll_new(db, now)
+    b = budget_state(db, now)
+    if b["exhausted"]:
+        # Готовое уже забрано выше, черновики дойдут до публикации; новых трат нет
+        announce(f"Бюджет месяца исчерпан: ≈ ${b['spent']:.2f} из ${b['budget']:.2f} (оценка ×{COST_FACTOR}). "
+                 "Новые батчи не отправляются до следующего месяца, готовые забираются, публикация идёт.",
+                 warning=True)
+        return pending
+    this_run = generated_since(db, run_started) if run_started else 0
+    allowed = max(0, min(limit - this_run, MAX_GENERATE_PER_DAY - b["today"]))
+    if allowed == 0 and db.execute("SELECT 1 FROM item WHERE stage = 'triaged' LIMIT 1").fetchone():
+        why = "за сутки" if b["today"] >= MAX_GENERATE_PER_DAY else "за запуск"
+        print(f"Потолок генераций {why} достигнут — генерация ждёт следующего запуска")
+    for sub in (submit_triage(db, client),
+                submit_generate(db, client, res, allowed) if allowed else None,
+                submit_fix(db, client, res)):
         pending += sub is not None
     return pending
 
@@ -605,15 +701,18 @@ def main():
     if args.status:
         status(db)
         return
+    monthly_budget()   # кривое значение переменной — ошибка сразу, до вызовов API
     client = llm.make_client()
     res = Resources(site_repo())
+    started = now_iso()
     deadline = time.monotonic() + args.max_wait * 60
     while True:
-        pending = run_once(db, client, res, args.limit)
+        pending = run_once(db, client, res, args.limit, run_started=started)
         if not args.wait or not pending or time.monotonic() > deadline:
             break
         time.sleep(args.poll)
     status(db)
+    announce(budget_line(budget_state(db, datetime.now(timezone.utc))), echo=False)   # в лог уже напечатал status
 
 
 if __name__ == "__main__":

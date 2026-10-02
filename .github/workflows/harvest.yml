@@ -136,6 +136,8 @@ jobs:
         env:
           AI_NEWS_ANTHROPIC_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           AI_NEWS_SITE_REPO: ${{ github.workspace }}/site
+          # Месячный бюджет в $, не задан — 8. Исчерпан — прогон зелёный, с предупреждением
+          AI_NEWS_MONTHLY_BUDGET_USD: ${{ vars.AI_NEWS_MONTHLY_BUDGET_USD }}
         run: python pipeline.py
 
       - name: Публикация
