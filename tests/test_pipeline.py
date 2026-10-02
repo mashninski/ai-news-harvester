@@ -154,7 +154,6 @@ def test_truncated_text_is_detected():
     assert not lint.truncated("Хто гэта?\n\nНевядома…")
 
 
-@needs_node
 def test_truncated_generation_goes_back(tmp_path, site, monkeypatch):
     monkeypatch.setattr(pipeline, "CARDS_DIR", tmp_path / "cards")
     db = collect.open_state(tmp_path / "state.sqlite")
@@ -167,12 +166,13 @@ def test_truncated_generation_goes_back(tmp_path, site, monkeypatch):
         return a
     client = fake_client(cut)
     for _ in range(3):
-        pipeline.run_once(db, client, pipeline.Resources(site), limit=10)
+        pipeline.run_once(db, client, pipeline.Resources(site, "narkamauka"), limit=10)
     stage, error = db.execute("SELECT stage, error FROM item WHERE hash = ?", (h1,)).fetchone()
     assert stage in ("triaged", "generate_sent") and "абарваны: retelling" in error
     assert not (tmp_path / "cards" / f"{h1}.json").exists()
 
 
+@needs_node
 def test_u_after_marker_follows_previous_word():
     # «}}» закрывает конвертеру предыдущее слово — «ў» ставим сами, тем же правилом
     out = tarask.convert(["найбольшы {{term:funding-round|раунд фінансавання}} у гісторыі",
@@ -284,12 +284,18 @@ def answers(stage, params):
         return {"fixes": [{"n": 1, "sentence": "Мадэль — найбольшая.", "changed": True}]}
 
 
-@needs_node
-def test_full_cycle_across_runs(tmp_path, site, monkeypatch):
+def no_converter(*a, **k):
+    raise AssertionError("при наркамаўке конвертер не вызывается")
+
+
+@pytest.mark.parametrize("ortho", ["narkamauka", pytest.param("tarask", marks=needs_node)])
+def test_full_cycle_across_runs(tmp_path, site, monkeypatch, ortho):
     monkeypatch.setattr(pipeline, "CARDS_DIR", tmp_path / "cards")
+    if ortho == "narkamauka":
+        monkeypatch.setattr(tarask, "run_converter", no_converter)
     db = collect.open_state(tmp_path / "state.sqlite")
     h0, h1, h2 = seed(db)
-    res = pipeline.Resources(site)
+    res = pipeline.Resources(site, ortho)
     client = fake_client(answers)
 
     # Запуск 1: triage отправлен, ничего не готово
@@ -311,11 +317,16 @@ def test_full_cycle_across_runs(tmp_path, site, monkeypatch):
 
     card = json.loads((tmp_path / "cards" / f"{h2}.json").read_text(encoding="utf-8"))
     assert card["status"] == "draft" and card["importance"] == 3 and card["vendor"] == "openai"
+    assert card["orthography"] == ortho
     assert card["retelling"].startswith("Мадэль — найбольшая.")          # fix встал на место
     assert card["lint"][0]["changed"] and card["lint"][0]["hits"] == ["з'яўляецца"]
     assert "Рохін Шах" in card["retelling"] and "{{name:" not in card["retelling"]  # guard + маркер снят
     assert "{{term:fine-tuning|файн-цюнінг}}" in card["thesis"]          # разметка терминов хранится
-    assert "Навучаньне" in card["summary"]                               # конвертер отработал
+    if ortho == "tarask":
+        assert "Навучаньне" in card["summary"]                           # конвертер отработал
+    else:
+        assert card["summary"] == "Навучанне заняло тыдзень. Рохін Шах пракаментаваў."  # как написала модель
+        assert not any(n["kind"] == "канвертар" for n in card["review_notes"])
     assert "{{term:bogus" not in card["retelling"]                       # неизвестный слаг снят
     assert any(n["kind"] == "тэрмін" for n in card["review_notes"])
     # Все пять батчей отправлены по одному разу и забраны
@@ -323,12 +334,39 @@ def test_full_cycle_across_runs(tmp_path, site, monkeypatch):
     assert db.execute("SELECT COUNT(*) FROM batch").fetchone()[0] == 3   # triage, generate, fix
 
 
-@needs_node
+def test_narkamauka_fix_is_not_converted_again(site, monkeypatch):
+    # Исправленное fix-проходом встаёт как есть: второй конвертации нет
+    monkeypatch.setattr(tarask, "run_converter", no_converter)
+    res = pipeline.Resources(site, "narkamauka")
+    nk = {f: "Адзін сказ." for f in pipeline.FIELDS}
+    nk["retelling"] = "Мадэль з'яўляецца найбольшай. Другі сказ."
+    p = {"nk": dict(nk), "tk": dict(nk), "notes": []}
+    p["flagged"] = pipeline.lint_card(res, p["tk"])
+    assert p["flagged"] and p["flagged"][0]["hits"][0][1] == "з'яўляецца"
+    p["flagged"][0]["n"] = 1
+    out = pipeline.apply_fixes(res, p, [{"n": 1, "sentence": "Мадэль — найбольшая.", "changed": True}])
+    assert out["tk"]["retelling"] == out["nk"]["retelling"] == "Мадэль — найбольшая. Другі сказ."
+    assert out["lint_left"] == [] and out["notes"] == []
+
+
+def test_orthography_from_env(site, monkeypatch):
+    monkeypatch.delenv(pipeline.ORTHOGRAPHY_ENV, raising=False)
+    assert pipeline.orthography() == "narkamauka"                       # по умолчанию
+    monkeypatch.setattr(tarask, "run_converter", no_converter)
+    res = pipeline.Resources(site)
+    assert not res.tarask and res.guards is None
+    monkeypatch.setenv(pipeline.ORTHOGRAPHY_ENV, "tarask")
+    assert pipeline.orthography() == "tarask"
+    monkeypatch.setenv(pipeline.ORTHOGRAPHY_ENV, "lacinka")
+    with pytest.raises(SystemExit):
+        pipeline.orthography()
+
+
 def test_failed_results_go_back_and_then_fail(tmp_path, site, monkeypatch):
     monkeypatch.setattr(pipeline, "CARDS_DIR", tmp_path / "cards")
     db = collect.open_state(tmp_path / "state.sqlite")
     (h,) = seed(db, 1)
-    res = pipeline.Resources(site)
+    res = pipeline.Resources(site, "narkamauka")
     client = fake_client(lambda stage, params: None)   # каждый ответ — ошибка
     for _ in range(2 * pipeline.MAX_ATTEMPTS + 1):
         pipeline.run_once(db, client, res, limit=10)
@@ -336,12 +374,11 @@ def test_failed_results_go_back_and_then_fail(tmp_path, site, monkeypatch):
     assert stage == "failed" and attempts == pipeline.MAX_ATTEMPTS and "errored" in error
 
 
-@needs_node
 def test_unfinished_batch_waits_without_resubmitting(tmp_path, site, monkeypatch):
     monkeypatch.setattr(pipeline, "CARDS_DIR", tmp_path / "cards")
     db = collect.open_state(tmp_path / "state.sqlite")
     seed(db, 2)
-    res = pipeline.Resources(site)
+    res = pipeline.Resources(site, "narkamauka")
     client = fake_client(answers, delay=2)
     for _ in range(3):
         assert pipeline.run_once(db, client, res, limit=10) == 1   # всё ещё ждём
@@ -352,10 +389,11 @@ def test_unfinished_batch_waits_without_resubmitting(tmp_path, site, monkeypatch
 
 @needs_node
 def test_unfixable_lint_hits_are_kept_for_review(tmp_path, site, monkeypatch):
+    # Только при тарашкевіцы: разбивку на предложения меняет конвертер
     monkeypatch.setattr(pipeline, "CARDS_DIR", tmp_path / "cards")
     db = collect.open_state(tmp_path / "state.sqlite")
     (h,) = seed(db, 1)
-    res = pipeline.Resources(site)
+    res = pipeline.Resources(site, "tarask")
     payload = {"nk": {f: "Адзін сказ." for f in pipeline.FIELDS},
                "tk": {f: "Адзін сказ." for f in pipeline.FIELDS}, "notes": []}
     payload["nk"]["retelling"] = "Мадэль з'яўляецца найбольшай. Другі сказ."   # два сказа
@@ -376,16 +414,42 @@ def test_old_material_is_not_enrolled(tmp_path):
     assert db.execute("SELECT stage FROM item").fetchone()[0] == "too_old"
 
 
-def test_prompt_reference_block_is_stable(site):
+@pytest.mark.parametrize("tk", [False, True])
+def test_prompt_reference_block_is_stable(site, tk):
     # Кэш — совпадение префикса байт в байт: два построения должны совпасть
     prompts.reference_block.cache_clear()
-    a = prompts.cached_system(site, prompts.GENERATE_TASK)[0]["text"]
+    a = prompts.cached_system(site, prompts.generate_task(tk), tk)[0]["text"]
     prompts.reference_block.cache_clear()
-    b = prompts.cached_system(site, prompts.FIX_TASK)[0]["text"]
+    b = prompts.cached_system(site, prompts.FIX_TASK, tk)[0]["text"]
     assert a == b and "fine-tuning | fine-tuning → файн-цюнінг" in a
-    # Имена: как пишет модель; форма на сайте — только где конвертер её меняет
-    assert "Simon Willison → Саймон Уілісан (на сайце: Саймон Ўілісан) — блогер" in a
-    assert "Demis Hassabis → Дэміс Хасабіс\n" in a
+    assert "Demis Hassabis → Дэміс Хасабіс" + chr(10) in a
+    if tk:
+        # Имена: как пишет модель; форма на сайте — только где конвертер её меняет
+        assert "Simon Willison → Саймон Уілісан (на сайце: Саймон Ўілісан) — блогер" in a
+        assert "тарашкевіцу зробіць канвертар" in a
+    else:
+        # Наркамаўка: на сайте имя как пишет модель, о конвертере ни слова,
+        # а правило «глоссарий в тарашкевіцы — пишешь наркамаўкай» остаётся
+        assert "Simon Willison → Саймон Уілісан — блогер" in a and "на сайце: Саймон" not in a
+        assert "канвертар" not in a and "ты пішаш тое ж слова наркамаўкай" in a
+        assert "канвертар" not in prompts.GENERATE_TASK and "НАРКАМАЎКА" in prompts.GENERATE_TASK
+
+
+def test_linter_catches_dictionary_forms_as_written():
+    # При наркамаўке у линтера нет второй, сконвертированной формы фразы:
+    # словарь сайта должен ловить формы наркамаўкай так, как они записаны
+    try:
+        site = pipeline.site_repo()
+    except SystemExit:
+        pytest.skip("нет репозитория сайта")
+    linter = lint.Linter.load(site / "claude" / "ai-news-anti-calques.json", convert=list)
+    for text, avoid in [("Мадэль з'яўляецца найбольшай.", "з'яўляецца"),
+                        ("Кампанія прыняла ўдзел у раўндзе.", "прыняць удзел"),
+                        ("Фонд інвесціраваў 2 мільярды.", "інвесціраваць"),
+                        ("Па іх словах, гэта толькі пачатак.", "па іх словах"),
+                        ("Выйшлі дзве новыя мадэлей.", "мадэлей"),
+                        ("Рэзультаты пакуль не апублікавалі.", "рэзультат")]:
+        assert avoid in [h.rule.avoid for h in linter.check([text])], text
 
 
 def test_generate_prompt_keeps_publication_date_out():

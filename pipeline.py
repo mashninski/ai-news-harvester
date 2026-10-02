@@ -9,8 +9,10 @@
             Важность 1 отсекается
   generate  Sonnet 5, Batch API: заголовок, тезис, summary, пересказ наркамаўкай,
             термины глоссария размечены {{term:slug|форма}}
-  convert   taraskevizer + guard-маркеры (tarask.py) — наркамаўка → тарашкевіца
-  lint      антикальки после конвертера (lint.py), обычный код
+  convert   только при AI_NEWS_ORTHOGRAPHY=tarask: taraskevizer + guard-маркеры
+            (tarask.py), наркамаўка → тарашкевіца. По умолчанию (narkamauka)
+            шага нет: на сайт идёт текст модели как есть
+  lint      антикальки (lint.py), обычный код — по тексту, который пойдёт на сайт
   fix       Sonnet 5, Batch API: только помеченные предложения
   draft     output/cards/<hash>.json, status = draft
 
@@ -25,6 +27,7 @@ Batch API асинхронный: отправленное сегодня при
     python pipeline.py --status   # только показать, что где лежит
 
 Ключ — переменная окружения AI_NEWS_ANTHROPIC_KEY (llm.py).
+Орфография карточек — AI_NEWS_ORTHOGRAPHY: narkamauka (по умолчанию) или tarask.
 Языковые ресурсы — из репозитория сайта, путь в AI_NEWS_SITE_REPO,
 по умолчанию ../mashninski-site.
 """
@@ -71,6 +74,14 @@ PRICES = {llm.TRIAGE_MODEL: (1.0, 5.0), llm.GENERATE_MODEL: (2.0, 10.0)}
 MAX_TOKENS = {"triage": 400, "generate": 16000, "fix": 8000}
 EFFORT = {"generate": "medium", "fix": "low"}   # генерация — язык, на ней не экономим (спека, §3)
 
+# Орфография карточек. Тарашкевіца выключена решением автора 02.10.2026 (журнал
+# сайта): конвертер taraskevizer ошибается, свой ещё не написан. narkamauka —
+# на сайт идёт текст модели как есть, Node не нужен; tarask — прежний путь через
+# конвертер. Код tarask.py и guard-словарь остаются: вернуть тарашкевіцу —
+# одна переменная, когда будет свой конвертер
+ORTHOGRAPHY_ENV = "AI_NEWS_ORTHOGRAPHY"
+ORTHOGRAPHIES = ("narkamauka", "tarask")
+
 log = logging.getLogger("pipeline")
 
 
@@ -83,16 +94,40 @@ def site_repo() -> Path:
     return p
 
 
-class Resources:
-    """Глоссарий, guard-словарь и линтер — читаются один раз за запуск."""
+def orthography() -> str:
+    o = (os.environ.get(ORTHOGRAPHY_ENV) or ORTHOGRAPHIES[0]).strip()
+    if o not in ORTHOGRAPHIES:
+        raise SystemExit(f"{ORTHOGRAPHY_ENV}={o!r}: можна {' або '.join(ORTHOGRAPHIES)}")
+    return o
 
-    def __init__(self, site: Path):
+
+class Resources:
+    """Глоссарий, guard-словарь и линтер — читаются один раз за запуск.
+    Орфография — аргументом или из AI_NEWS_ORTHOGRAPHY."""
+
+    def __init__(self, site: Path, ortho: str | None = None):
         c = site / "claude"
         self.site = site
-        self.guards = tarask.Guards.load(c / "ai-news-converter-guards.json")
-        self.linter = lint.Linter.load(c / "ai-news-anti-calques.json")
+        self.orthography = ortho or orthography()
+        self.tarask = self.orthography == "tarask"
+        if self.tarask:
+            self.guards = tarask.Guards.load(c / "ai-news-converter-guards.json")
+            self.linter = lint.Linter.load(c / "ai-news-anti-calques.json")
+        else:
+            # Без конвертера фраза словаря ищется только так, как записана, —
+            # наркамаўкай, как пишет и модель. Node не вызывается
+            self.guards = None
+            self.linter = lint.Linter.load(c / "ai-news-anti-calques.json", convert=list)
         glossary = json.loads((c / "ai-news-glossary.json").read_text(encoding="utf-8"))["entries"]
         self.slugs = {prompts.slug(e["term"]) for e in glossary}
+
+    def convert(self, texts: list[str]) -> list[str]:
+        """Текст модели → текст на сайт. При наркамаўке — как есть."""
+        return tarask.convert(texts, self.guards) if self.tarask else list(texts)
+
+    def suspicious(self, before: str, after: str) -> list[dict]:
+        """Подозрительные замены конвертера. Без конвертера замен нет."""
+        return tarask.suspicious_changes(before, after, self.guards) if self.tarask else []
 
 
 def now_iso() -> str:
@@ -301,11 +336,11 @@ def ensure_body(db, m: dict) -> str | None:
     return None
 
 
-def generate_request(site: Path, m: dict) -> dict:
+def generate_request(res: Resources, m: dict) -> dict:
     return {"custom_id": custom_id("generate", m["hash"]), "params": {
         "model": llm.GENERATE_MODEL,
         "max_tokens": MAX_TOKENS["generate"],
-        "system": prompts.cached_system(site, prompts.GENERATE_TASK),
+        "system": prompts.cached_system(res.site, prompts.generate_task(res.tarask), res.tarask),
         "messages": [{"role": "user", "content": prompts.generate_user(m)}],
         "output_config": {"effort": EFFORT["generate"],
                           "format": {"type": "json_schema", "schema": prompts.GENERATE_SCHEMA}},
@@ -322,7 +357,7 @@ def submit_generate(db, client, res: Resources, limit: int = MAX_GENERATE_PER_RU
         if err:
             fail_step(db, h, "triaged", err)
             continue
-        reqs.append(generate_request(res.site, m))
+        reqs.append(generate_request(res, m))
         hashes.append(h)
     db.commit()
     return submit(db, client, "generate", reqs, hashes, "generate_sent")
@@ -357,8 +392,9 @@ def lint_card(res: Resources, tk: dict) -> list[dict]:
 
 
 def process_generated(res: Resources, drafts: dict[str, dict]) -> dict[str, dict]:
-    """Сгенерированное наркамаўкай → тарашкевіца → линтер. drafts: hash → поля.
-    Возвращает hash → payload (nk, tk, flagged, notes)."""
+    """Сгенерированное наркамаўкай → (тарашкевіца, если включена) → линтер.
+    drafts: hash → поля. Возвращает hash → payload (nk, tk, flagged, notes):
+    nk — текст модели, tk — текст на сайт; при наркамаўке они совпадают."""
     out, fixed = {}, {}
     # Механика (латинская буква в слове, «2$», «42.92%») — кодом, до конвертера
     for h, nk in drafts.items():
@@ -367,7 +403,7 @@ def process_generated(res: Resources, drafts: dict[str, dict]) -> dict[str, dict
             nk[f], changes = lint.normalize(nk[f])
             fixed[h] += [{"kind": "аўтавыпраўленьне", "detail": f"{f}: {c}"} for c in changes]
     order = [(h, f) for h in drafts for f in FIELDS]
-    converted = tarask.convert([drafts[h][f] for h, f in order], res.guards)
+    converted = res.convert([drafts[h][f] for h, f in order])
     tk_all = {}
     for (h, f), text in zip(order, converted):
         tk_all.setdefault(h, {})[f] = text
@@ -375,9 +411,10 @@ def process_generated(res: Resources, drafts: dict[str, dict]) -> dict[str, dict
         tk = tk_all[h]
         notes = fixed[h]
         for f in FIELDS:
-            for n in tarask.suspicious_changes(nk[f], tk[f], res.guards):
+            for n in res.suspicious(nk[f], tk[f]):
                 notes.append({"kind": "канвертар", "detail": f"{f}: «{n['before']}» → «{n['after']}» ({n['kind']})"})
-        out[h] = {"nk": nk, "tk": tk, "flagged": lint_card(res, tk), "notes": notes}
+        out[h] = {"nk": nk, "tk": tk, "flagged": lint_card(res, tk), "notes": notes,
+                  "orthography": res.orthography}
     return out
 
 
@@ -433,7 +470,7 @@ def submit_fix(db, client, res: Resources) -> str | None:
         reqs.append({"custom_id": custom_id("fix", h), "params": {
             "model": llm.GENERATE_MODEL,
             "max_tokens": MAX_TOKENS["fix"],
-            "system": prompts.cached_system(res.site, prompts.FIX_TASK),
+            "system": prompts.cached_system(res.site, prompts.FIX_TASK, res.tarask),
             "messages": [{"role": "user", "content": prompts.fix_user(card_text, flagged)}],
             "output_config": {"effort": EFFORT["fix"],
                               "format": {"type": "json_schema", "schema": prompts.FIX_SCHEMA}},
@@ -445,18 +482,19 @@ def submit_fix(db, client, res: Resources) -> str | None:
 
 
 def apply_fixes(res: Resources, p: dict, fixes: list[dict]) -> dict:
-    """Исправленные предложения (наркамаўка) → конвертер → на место в тексте."""
+    """Исправленные предложения (наркамаўка) → конвертер, если включён → на место
+    в тексте. При наркамаўке исправленное идёт как есть, второй конвертации нет."""
     by_n = {f["n"]: f for f in fixes}
     todo = [fl for fl in p["flagged"] if "n" in fl and fl["n"] in by_n and by_n[fl["n"]]["changed"]]
     for fl in todo:
         by_n[fl["n"]]["sentence"], _ = lint.normalize(by_n[fl["n"]]["sentence"].strip())
-    converted = tarask.convert([by_n[fl["n"]]["sentence"] for fl in todo], res.guards)
+    converted = res.convert([by_n[fl["n"]]["sentence"] for fl in todo])
     nk = {f: lint.split_paragraphs(p["nk"][f]) for f in FIELDS}
     tk = {f: lint.split_paragraphs(p["tk"][f]) for f in FIELDS}
     for fl, conv in zip(todo, converted):
         nk[fl["field"]][fl["p"]][fl["s"]] = by_n[fl["n"]]["sentence"].strip()
         tk[fl["field"]][fl["p"]][fl["s"]] = conv
-        for n in tarask.suspicious_changes(by_n[fl["n"]]["sentence"], conv, res.guards):
+        for n in res.suspicious(by_n[fl["n"]]["sentence"], conv):
             p["notes"].append({"kind": "канвертар", "detail": f"{fl['field']} (fix): «{n['before']}» → «{n['after']}»"})
     for f in FIELDS:
         p["nk"][f] = lint.join_paragraphs(nk[f])
@@ -500,7 +538,8 @@ def build_card(db, h: str, p: dict) -> dict:
         "category": item[0],
         "importance": item[2],
         "sources": m["sources"],
-        # Тарашкевіца, термины размечены {{term:slug|форма}} — подстановка при рендере (этап 6)
+        # Орфография — по AI_NEWS_ORTHOGRAPHY; термины размечены {{term:slug|форма}},
+        # подстановка при рендере (этап 6)
         "be_title": tarask.strip_names(p["tk"]["be_title"]),
         "thesis": tarask.strip_names(p["tk"]["thesis"]),
         "summary": tarask.strip_names(p["tk"]["summary"]),
@@ -508,8 +547,10 @@ def build_card(db, h: str, p: dict) -> dict:
         "review_notes": notes,
         # Что пометил линтер и что сделал fix: видно, где срабатывания ложные
         "lint": p.get("fix_log", []),
-        # Что сгенерировала модель до конвертера — чтобы разбирать ошибки конвертера
+        # Что сгенерировала модель до конвертера — чтобы разбирать ошибки конвертера.
+        # При наркамаўке совпадает с текстом выше
         "narkamauka": p["nk"],
+        "orthography": p.get("orthography", "tarask"),
         "generated_at": now_iso(),
         "models": {"triage": llm.TRIAGE_MODEL, "generate": llm.GENERATE_MODEL},
     }

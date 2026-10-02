@@ -37,6 +37,10 @@ env:
   # Ветка сайта, откуда берутся глоссарий и словари и куда открывается PR.
   # До запуска раздела (этап 8) — naviny-test: main фронта /naviny не содержит
   SITE_BRANCH: ${{ vars.AI_NEWS_SITE_BRANCH || 'naviny-test' }}
+  # Орфография карточек: narkamauka — текст модели как есть, Node не нужен;
+  # tarask — через конвертер taraskevizer. Тарашкевіца выключена решением
+  # автора 02.10.2026 (журнал сайта); вернуть — переменная AI_NEWS_ORTHOGRAPHY = tarask
+  AI_NEWS_ORTHOGRAPHY: ${{ vars.AI_NEWS_ORTHOGRAPHY || 'narkamauka' }}
 
 jobs:
   harvest:
@@ -114,14 +118,14 @@ jobs:
           persist-credentials: false
 
       - uses: actions/setup-node@v4
-        if: ${{ !cancelled() && env.PIPELINE == 'on' && steps.guard.outcome == 'success' }}
+        if: ${{ !cancelled() && env.PIPELINE == 'on' && steps.guard.outcome == 'success' && env.AI_NEWS_ORTHOGRAPHY == 'tarask' }}
         with:
           node-version: "22"
           cache: npm
           cache-dependency-path: tools/taraskevize/package-lock.json
 
       - name: Конвертер
-        if: ${{ !cancelled() && env.PIPELINE == 'on' && steps.guard.outcome == 'success' }}
+        if: ${{ !cancelled() && env.PIPELINE == 'on' && steps.guard.outcome == 'success' && env.AI_NEWS_ORTHOGRAPHY == 'tarask' }}
         working-directory: tools/taraskevize
         run: npm ci
 

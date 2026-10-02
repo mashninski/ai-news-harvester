@@ -180,7 +180,8 @@ def run_pipeline(client, corpus, inputs, poll: int) -> dict[str, dict]:
     Triage пропускается: материалы корпуса уже отобраны. Возвращает n → карточка."""
     db = collect.open_state(EVAL_DIR / "state.sqlite")
     pipeline.CARDS_DIR = EVAL_DIR / "cards"
-    res = pipeline.Resources(pipeline.site_repo())
+    # Корпус и судья — в тарашкевіцы: прогон по корпусу всегда идёт через конвертер
+    res = pipeline.Resources(pipeline.site_repo(), "tarask")
     stamp = pipeline.now_iso()
     by_hash = {}
     for c in corpus:
@@ -283,7 +284,7 @@ def judge(client, corpus, cards, poll: int) -> dict:
         ref = f"{c['title']}\n\n{c['body']}"
         reqs.append({"custom_id": f"judge-{c['n']}", "params": {
             "model": JUDGE_MODEL, "max_tokens": 32000,
-            "system": [{"type": "text", "text": prompts.reference_block(pipeline.site_repo()),
+            "system": [{"type": "text", "text": prompts.reference_block(pipeline.site_repo(), True),
                         "cache_control": {"type": "ephemeral", "ttl": "1h"}}],
             "messages": [{"role": "user", "content": JUDGE_PROMPT.format(reference=ref, numbered=numbered)
                           + "\n\nСказ 0 — загаловак."}],
