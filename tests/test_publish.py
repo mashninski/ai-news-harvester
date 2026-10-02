@@ -241,6 +241,37 @@ def test_failed_line_comments_fall_back_to_body_and_state_is_kept(tmp_path):
     assert f"{1:040x}" in publish.done_ids(db)
 
 
+def test_drafts_of_a_day_go_into_one_pr_and_nothing_is_lost(tmp_path):
+    # Один PR в сутки: черновики 12 прогонов копятся в output/cards (между
+    # прогонами — кэш Actions) и все уходят в PR прогона 05:17
+    cards_dir = tmp_path / "cards"
+    cards_dir.mkdir()
+    db = collect.open_state(tmp_path / "state.sqlite")
+    for run in range(3):                                   # три прогона без публикации
+        for n in (2 * run + 1, 2 * run + 2):
+            (cards_dir / f"{n:040x}.json").write_text(json.dumps(card(n), ensure_ascii=False), encoding="utf-8")
+    cards, broken = publish.load_cards(cards_dir)
+    s = FakeSession(routes())
+    plan = publish.plan_pr(cards, broken, publish.done_ids(db), "main", WHEN)
+    publish.publish(plan, publish.GitHub("o/r", "t", s), db, "main")
+    assert len(plan.entries) == 6 and len([c for c in s.calls if c[1] == "/pulls"]) == 1
+    # Назавтра: в PR только новое, предложенное вчера второй раз не идёт, файлы не удалялись
+    (cards_dir / f"{7:040x}.json").write_text(json.dumps(card(7), ensure_ascii=False), encoding="utf-8")
+    cards, broken = publish.load_cards(cards_dir)
+    assert len(cards) == 7
+    plan = publish.plan_pr(cards, broken, publish.done_ids(db), "main", WHEN)
+    assert [e.card["id"] for e in plan.entries] == [f"{7:040x}"]
+
+
+def test_workflow_publishes_once_a_day_or_by_hand():
+    wf = (Path(__file__).resolve().parent.parent / ".github" / "workflows" / "harvest.yml").read_text(encoding="utf-8")
+    # Прогон публикации узнаётся по строке расписания: она должна совпадать
+    # в списке cron и в условии PUBLISH, а других прогонов в 05:17 быть не должно
+    assert '- cron: "17 5 * * *"' in wf and "github.event.schedule == '17 5 * * *'" in wf
+    assert '- cron: "17 1,3,7,9,11,13,15,17,19,21,23 * * *"' in wf
+    assert "inputs.publish == true" in wf and "env.PUBLISH == 'true'" in wf
+
+
 def test_bot_refuses_branch_outside_prefix():
     plan = plan_with_note()
     plan.branch = "main"
