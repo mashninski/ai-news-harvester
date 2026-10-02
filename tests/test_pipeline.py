@@ -609,3 +609,13 @@ def test_generation_takes_important_then_freshest_and_expires_stale(tmp_path, si
     assert sent == [hs[2], hs[1]]
     stages = dict(db.execute("SELECT hash, stage FROM item"))
     assert stages[hs[0]] == "triaged" and stages[hs[3]] == "too_old"
+
+
+def test_generate_prompt_asks_each_layer_to_add_something_new():
+    # Замечание автора 25.09.2026: заголовок, тезис и пересказ дублировали друг друга
+    for task in (prompts.GENERATE_TASK, prompts.GENERATE_TASK_TARASK):
+        assert "thesis не паўтарае загаловак" in task
+        assert "summary не паўтарае тэзіс" in task
+        assert "retelling не пачынаецца з тэзіса" in task
+        assert "Першы абзац — што здарылася і хто." not in task   # прежняя формулировка вела к повтору
+        assert '"' not in prompts.LAYERS                           # прямая кавычка обрывает поле ответа
