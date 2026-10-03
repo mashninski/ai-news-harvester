@@ -38,6 +38,7 @@ import requests
 
 import collect
 import lint
+import prompts
 import tarask
 
 ROOT = Path(__file__).resolve().parent
@@ -150,6 +151,103 @@ def check(card: dict) -> tuple[list[str], list[dict]]:
             notes.append({"kind": "публікацыя", "detail": f"{f}: простыя двукоссі «{m.group()}» — у JSON яны "
                                                           "з адваротнай касой рысай, лепш «ёлачкі»"})
     return fatal, notes
+
+
+# ---------- заметки о содержании: только здесь, не на сайте ----------
+# Правила промпта, которые модель нарушала в первом PR (журнал сайта, 03.10.2026,
+# «первый PR бота проверен»): относительные даты, длина пересказа, повтор тезиса.
+# Не запрет, а заметка «публікацыя» — карточка уходит в PR, ревьюер видит её
+# у своей строки. В check() их нет намеренно: check() повторён в дашборде сайта
+# (publishCheck) и сверяется с ним слово в слово, а эти заметки нужны только
+# на ревью PR (этап 8б, ai-news-plan.md сайта)
+
+# Относительная дата на сайте устаревает сразу: дата публикации и так стоит
+# в карточке (prompts.DATES). Дни недели — во всех падежах
+REL_DATE_RE = re.compile(
+    r"\b(?:"
+    r"[уў]\s+(?:панядзел|аўтор|серад|чацв[ея]р|пятніц|субот|нядзел)\w*"
+    r"|(?:панядзел(?:ак|ка|ку|кам)|аўтор(?:ак|ка|ку|кам)|серад(?:а|ы|у|зе|ай)|чацв(?:ер|ярга|яргу|яргом)"
+    r"|пятніц(?:а|ы|у|ай)|субот(?:а|ы|у|ай|е)|нядзел(?:я|і|ю|яй))"
+    r"|пазаўчора|паслязаўтра|[уў]чора(?:шн\w*)?|сё(?:ння|ньня)(?:шн\w*)?|заўтра(?:шн\w*)?|сёлета|летась|днямі"
+    r"|на\s+(?:гэтых\s+)?(?:выхадных|днях)|[уў]\s+выхадныя"
+    r"|(?:гэт|мінул|наступн|папярэдн|бягуч|апошн)\w*\s+(?:выхадн|тыд|месяц|год|гад)\w*"
+    r"|(?:\w+\s+)?(?:дзень|дзён|дні|тыдзень|тыдні|тыдняў|месяц|месяцы|месяцаў|год|гады|гадоў)\s+таму"
+    r")\b",
+    re.IGNORECASE)
+
+# Повтор тезиса: доля значимых слов тезиса, которые есть и в первом абзаце
+# пересказа (или в summary). Порог подобран на пяти карточках первого PR —
+# tests/fixtures/naviny_pr1, разбор в журнале сайта, 03.10.2026, «этап 8б».
+# Повторы там — 0,44–0,89, не повторы — 0,26–0,33
+REPEAT_SHARE = 0.4
+REPEAT_MIN_SHARED = 3          # короткий тезис: три общих слова ещё не повтор
+STEM_LEN = 5                   # основа — первые буквы: склонение не мешает сравнению
+REPEAT_STOPWORDS = set("""
+і й у ў з са на да ад па пра за а але ды што як гэта гэты гэтая гэтыя гэтым гэтага які якая
+якое якія якой якую якім яе яго іх ім ён яна яно яны не ні ці пры для пасля праз таксама
+ужо ўжо толькі яшчэ каб калі дзе тут там так усё ўсё усе ўсе свой свая сваё свае сваіх
+сваім сваёй сваю сам сама самі быў была было былі будзе ёсць мае маюць можа перад над пад
+паміж без аб або бо то ж жа хоць нават вельмі больш менш чым тым той тая тое тыя
+""".split())
+REPEAT_WORD_RE = re.compile(r"[0-9a-zа-яёіў']+(?:[-.,][0-9a-zа-яёіў]+)*", re.IGNORECASE)
+TERM_MARK_RE = re.compile(r"\{\{term:[^|}]*\|([^}]*)\}\}")
+
+
+def plain(text: str) -> str:
+    """Текст без разметки терминов: {{term:slug|форма}} → форма."""
+    return TERM_MARK_RE.sub(r"\1", text)
+
+
+def word_count(text: str) -> int:
+    """Слова пересказа: тире, «$» и прочие знаки отдельно словами не считаются."""
+    return sum(1 for w in plain(text).split() if re.search(r"\w", w))
+
+
+def stems(text: str) -> set[str]:
+    """Значимые слова по основе. Латиница и числа — целиком: GLM-5.3, 4, 2026."""
+    text = plain(text).lower().replace("ў", "у").replace("’", "'").replace("ʼ", "'")
+    out = set()
+    for w in REPEAT_WORD_RE.findall(text):
+        w = w.strip("'")
+        if w in REPEAT_STOPWORDS or (len(w) < 2 and not w.isdigit()):
+            continue
+        out.add(w if re.search(r"[0-9a-z]", w) else w[:STEM_LEN])
+    return out
+
+
+def repeat_share(thesis: str, other: str) -> float:
+    """Доля значимых слов тезиса, которые повторены в other; 0 — если общих меньше минимума."""
+    t, o = stems(thesis), stems(other)
+    shared = len(t & o)
+    return shared / len(t) if t and shared >= REPEAT_MIN_SHARED else 0.0
+
+
+def content_notes(card: dict) -> list[dict]:
+    """Заметки «публікацыя» о содержании: относительные даты, длина пересказа,
+    повтор тезиса. Карточка с ними в PR идёт — это не check()."""
+    notes = []
+    for f in ("thesis", "summary", "retelling"):
+        found = {}
+        for m in REL_DATE_RE.finditer(card[f]):
+            found.setdefault(" ".join(m.group().lower().split()), m.group())
+        for text in found.values():
+            # Цитата — как в тексте: по ней заметка встаёт к своему абзацу (anchor)
+            notes.append({"kind": "публікацыя", "detail": f"{f}: адносная дата «{text}» — на сайце "
+                                                          "састарэе, дата публікацыі ўжо ёсьць у картцы"})
+    lo, hi = prompts.RETELLING_WORDS
+    n = word_count(card["retelling"])
+    if not lo <= n <= hi:
+        notes.append({"kind": "публікацыя", "detail": f"retelling: {n} {plural(n, 'слова', 'словы', 'слоў')}"
+                                                      f" — норма {lo}–{hi}"})
+    first = paragraphs(card["retelling"])[0]
+    if (share := repeat_share(card["thesis"], first)) > REPEAT_SHARE:
+        # Начало абзаца до первой «ёлачкі»: иначе цитата в заметке разорвётся
+        start = " ".join(re.split(r"[«»]", first)[0].split()[:6])
+        notes.append({"kind": "публікацыя", "detail": f"retelling: першы абзац паўтарае тэзіс "
+                                                      f"({share:.0%} значных слоў тэзіса) — «{start}…»"})
+    if (share := repeat_share(card["thesis"], card["summary"])) > REPEAT_SHARE:
+        notes.append({"kind": "публікацыя", "detail": f"summary: паўтарае тэзіс ({share:.0%} значных слоў тэзіса)"})
+    return notes
 
 
 # ---------- заметки → комментарии к строкам дифа ----------
@@ -318,7 +416,7 @@ def plan_pr(cards: list[dict], broken: list, done: set[str], base: str, when: da
         sc = site_card(c)
         path = card_path(c["id"])
         text = render(sc)
-        notes = list(c.get("review_notes") or []) + extra
+        notes = list(c.get("review_notes") or []) + extra + content_notes(c)
         e = Entry(c, sc, path, text, notes)
         e.comments = comments_for(path, sc, text, notes)
         entries.append(e)

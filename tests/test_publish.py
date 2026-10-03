@@ -1,7 +1,10 @@
 """Публикация (этап 5) без сети: формат карточки для сайта, проверка,
 заметки → комментарии к строкам дифа, тело PR и весь разговор с GitHub
 на поддельной сессии. Карточки — выдуманные: настоящие черновики лежат
-в приватном репозитории сайта и сюда не копируются."""
+в приватном репозитории сайта и сюда не копируются. Исключение — тексты
+пяти карточек первого PR бота (fixtures/naviny_pr1): на них подобран порог
+повтора тезиса (этап 8б, журнал сайта, 03.10.2026); PR был открыт в main,
+четыре из пяти опубликованы на сайте."""
 
 import json
 import os
@@ -84,6 +87,102 @@ def test_check_notes_for_what_reviewer_fixes_himself():
     assert any("«{{name:Саймон Ўілісан}}»" in d for d in details)
 
 
+# ---------- заметки о содержании ----------
+# Пять карточек первого PR в main — коммит бота 306889a в ветке
+# naviny/2026-10-03-0540 сайта, до ручной правки; только тексты. Разбор
+# журнала сайта (03.10.2026): первый абзац пересказа повторяет тезис у трёх,
+# summary — у одной, относительные даты — у d02470a, длина вне нормы — у трёх
+
+PR1 = Path(__file__).resolve().parent / "fixtures" / "naviny_pr1"
+
+
+def pr1_cards() -> dict[str, dict]:
+    out = {}
+    for p in sorted(PR1.glob("*.json")):
+        c = json.loads(p.read_text(encoding="utf-8"))
+        c["retelling"] = "\n\n".join(c["retelling"])      # в черновике пайплайна пересказ — строкой
+        out[p.stem[:7]] = c
+    return out
+
+
+def notes_of(c: dict, start: str) -> list[str]:
+    return [n["detail"] for n in publish.content_notes(c) if n["detail"].startswith(start)]
+
+
+def test_repeat_threshold_on_first_pr():
+    cards = pr1_cards()
+    first = {k for k, c in cards.items() if notes_of(c, "retelling: першы абзац паўтарае тэзіс")}
+    summary = {k for k, c in cards.items() if notes_of(c, "summary: паўтарае тэзіс")}
+    assert first == {"b2497ef", "c798f2b", "ce0a680"}
+    assert summary == {"c798f2b"}
+    # Запас по обе стороны порога: повторы и не повторы не жмутся к нему
+    shares = {k: publish.repeat_share(c["thesis"], publish.paragraphs(c["retelling"])[0]) for k, c in cards.items()}
+    assert min(shares[k] for k in first) >= publish.REPEAT_SHARE + 0.04
+    assert max(v for k, v in shares.items() if k not in first) <= publish.REPEAT_SHARE - 0.06
+
+
+def test_dates_and_length_on_first_pr():
+    cards = pr1_cards()
+    dates = {k: notes_of(c, "") for k, c in cards.items()}
+    dates = {k: [d for d in v if "адносная дата" in d] for k, v in dates.items()}
+    assert {k for k, v in dates.items() if v} == {"d02470a"}
+    found = " ".join(dates["d02470a"])
+    for phrase in ("«у пятніцу»", "«апошнія выхадныя»", "«Два месяцы таму»", "«апошні тыдзень»", "«На выхадных»"):
+        assert phrase in found
+    long_short = {k: notes_of(c, "retelling: ") for k, c in cards.items()}
+    long_short = {k: [d for d in v if "норма 120–220" in d] for k, v in long_short.items()}
+    assert {k for k, v in long_short.items() if v} == {"c773f1b", "c798f2b", "d02470a"}
+    assert long_short["c798f2b"] == ["retelling: 71 слова — норма 120–220"]
+
+
+@pytest.mark.parametrize("text", [
+    "у панядзелак", "ў аўторак", "у сераду", "у чацвер", "У пятніцу", "у суботу", "у нядзелю",
+    "да пятніцы", "учора", "ўчора", "Сёння", "сёньня", "заўтра", "пазаўчора", "паслязаўтра", "учорашні",
+    "на выхадных", "у выхадныя", "на гэтым тыдні", "на мінулым тыдні", "на наступным тыдні",
+    "апошні тыдзень", "у мінулым месяцы", "у гэтым годзе", "тры дні таму", "два тыдні таму",
+    "пяць месяцаў таму", "год таму", "сёлета", "летась", "днямі", "на днях",
+])
+def test_relative_date_found(text):
+    assert publish.REL_DATE_RE.search(f"Нешта {text} здарылася."), text
+
+
+@pytest.mark.parametrize("text", [
+    "ліміт выхадных токенаў", "выхадныя дадзеныя", "наступная мадэль", "апошняя версія",
+    "DevDay пройдзе 29 верасня", "раней", "тыдзень з лішнім", "сераднія вынікі", "аўтар артыкула",
+    "у 2026 годзе", "з мая па ліпень",
+])
+def test_relative_date_not_found(text):
+    assert not publish.REL_DATE_RE.search(f"Нешта {text} здарылася."), text
+
+
+def test_length_norm_comes_from_prompt():
+    lo, hi = publish.prompts.RETELLING_WORDS
+    assert f"{lo}–{hi} слоў" in publish.prompts.GENERATE_TASK
+    ok = "\n\n".join(["Слова " * 49 + "канец."] * 3)                                # 150 слоў
+    assert notes_of(card(retelling=ok), "retelling: ") == []
+    dashes = "Слова — " * (hi + 5)                                      # тире словам не лічыцца
+    assert notes_of(card(retelling=dashes.strip()), "retelling: ") == [f"retelling: {hi + 5} слоў — норма {lo}–{hi}"]
+
+
+def test_content_notes_go_to_pr_comments_not_into_check():
+    c = pr1_cards()["d02470a"]
+    full = card(5, **c)
+    fatal, notes = publish.check(full)
+    assert fatal == [] and not any("адносная дата" in n["detail"] for n in notes)   # check() — как на сайце
+    plan = publish.plan_pr([full], [], set(), "main", WHEN)
+    e = plan.entries[0]
+    bodies = "\n".join(x["body"] for x in e.comments)
+    assert "адносная дата «у пятніцу»" in bodies and "351 слова" in bodies
+    # Заметка о дате в пересказе — у своего абзаца
+    lines = e.text.split("\n")
+    two_months = next(x for x in e.comments if "Два месяцы таму" in x["body"])
+    assert "Два месяцы таму" in lines[two_months["line"] - 1]
+    # Повтор тезиса — у первого абзаца пересказа
+    repeat = publish.plan_pr([card(6, **pr1_cards()["b2497ef"])], [], set(), "main", WHEN).entries[0]
+    line = next(x["line"] for x in repeat.comments if "першы абзац паўтарае тэзіс" in x["body"])
+    assert repeat.text.split("\n")[line - 1].strip().startswith('"Anthropic Frontier Red Team праверыла')
+
+
 # ---------- заметки → комментарии ----------
 
 def test_notes_anchor_to_their_paragraph_and_duplicates_merge():
@@ -125,7 +224,8 @@ def test_plan_skips_done_and_broken_lists_skipped_in_body():
 
 
 def test_body_for_test_branch_warns_not_prod_and_escapes_table():
-    plan = publish.plan_pr([card(1, be_title="A | B")], [], set(), "naviny-test", WHEN)
+    normal = "\n\n".join(["Слова " * 49 + "канец."] * 3)      # пераказ у норме даўжыні — без заўваг
+    plan = publish.plan_pr([card(1, be_title="A | B", retelling=normal)], [], set(), "naviny-test", WHEN)
     assert "не прод" in plan.body and "`naviny-test`" in plan.body
     assert "A \\| B" in plan.body
     # список, а не таблица: на телефоне таблица шире экрана
