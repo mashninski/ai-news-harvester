@@ -75,10 +75,12 @@ MINSK = timezone(timedelta(hours=3))   # в Беларуси перевода ч
 MIN_BODY_CHARS = 400        # меньше — текста для пересказа мало
 MIN_BODY_ANY = 150          # меньше и докачать нельзя — пересказывать нечего
 # Докачка страницы, когда в фиде мало текста. Только эти источники: у DeepMind
-# и Hugging Face в фиде заголовок и пустой body (журнал сайта, 24.09.2026, этап 3).
+# и Hugging Face в фиде заголовок и пустой body (журнал сайта, 24.09.2026, этап 3),
+# у Mistral — анонс в одно предложение, 100–160 знаков (журнал сайта, 03.10.2026,
+# «Ars Technica и Mistral — берём оба»; статья — в <article id="blogpost">).
 # У остальных RSS страницы не скрейпим (спека, §3, п. 4) — Anthropic и так
 # берётся со страницы коллектором.
-PAGE_FETCH_SOURCES = {"deepmind", "huggingface"}
+PAGE_FETCH_SOURCES = {"deepmind", "huggingface", "mistral"}
 PAGE_PARAGRAPHS = 12
 
 # Цены на 24.09.2026, $ за миллион токенов (спека, §4). Batch — половина.
@@ -404,7 +406,7 @@ def on_triage(db, res, results, acc):
 # ---------- генерация ----------
 
 def ensure_body(db, m: dict) -> str | None:
-    """Если в фиде мало текста — одна докачка страницы (DeepMind, Hugging Face).
+    """Если в фиде мало текста — одна докачка страницы (DeepMind, Hugging Face, Mistral).
     Возвращает ошибку или None."""
     if len(m["body"]) >= MIN_BODY_CHARS:
         return None

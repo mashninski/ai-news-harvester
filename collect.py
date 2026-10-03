@@ -3,7 +3,7 @@
 Коллектор новостей об ИИ для раздела mashninski.com/naviny — этап 3 плана.
 
 Что делает за один прогон:
-  1. скачивает 8 RSS/Atom-фидов и sitemap Anthropic (у него нет RSS);
+  1. скачивает 9 RSS/Atom-фидов и sitemap Anthropic (у него нет RSS);
   2. приводит всё к виду {source, url, published_at, title, body, hash};
   3. отбрасывает уже виденное — по нормализованному URL, против data/state.sqlite;
   4. отбрасывает старше MAX_AGE_DAYS — в фидах OpenAI и Hugging Face лежит весь
@@ -65,11 +65,13 @@ SOURCES = [
     # для «*» фид не закрыт, наш User-Agent там не назван. Закроют фид боту —
     # источник уйдёт в «Источники с ошибкой», как VentureBeat; не обходим
     {"id": "arstechnica", "kind": "rss",    "url": "https://arstechnica.com/ai/feed/"},
+    # Вендор. Добавлен 03.10.2026 той же записью журнала сайта: robots.txt
+    # разрешает всё, но в записи фида только анонс в одно предложение — текст
+    # берётся со страницы перед генерацией (pipeline.PAGE_FETCH_SOURCES).
+    # Фид отдаёт весь архив с 2023 года — старое отсекает MAX_AGE_DAYS
+    {"id": "mistral",    "kind": "rss",     "url": "https://mistral.ai/rss.xml"},
     # Остальные кандидаты из спеки, §2, проверены probe_feeds.py 03.10.2026 —
     # разбор в журнале сайта того же числа и в спеке, §2:
-    # - Mistral AI (mistral.ai/rss.xml) — фид живой, robots.txt разрешает всё, но
-    #   в записи только анонс в одно предложение: без докачки страницы
-    #   (pipeline.PAGE_FETCH_SOURCES) пересказывать нечего. Решение автора;
     # - Microsoft AI — blogs.microsoft.com/ai/feed/ 410, microsoft.ai/feed/ — фид
     #   без единой записи; Meta AI — оба адреса 404, на странице блога ссылки
     #   на фид нет.
@@ -78,7 +80,7 @@ SOURCES = [
 
 # Блоги самих компаний. В кластере основным становится материал отсюда:
 # это первоисточник, портал его пересказывает.
-VENDORS = {"openai", "deepmind", "huggingface", "anthropic"}
+VENDORS = {"openai", "deepmind", "huggingface", "anthropic", "mistral"}
 
 MAX_AGE_DAYS = 7              # старше — пишем в состояние как виденное, дальше не отдаём
 
@@ -256,8 +258,8 @@ TEXT_DATE = re.compile(rf"({MONTHS})[a-z]* (\d{{1,2}}), (\d{{4}})\b")
 
 def parse_article(html: bytes, max_paragraphs: int = BODY_PARAGRAPHS) -> tuple[str, str, str | None]:
     """Заголовок, первые абзацы и дата публикации со страницы статьи.
-    Пайплайн (pipeline.py) зовёт её же, когда в фиде DeepMind или Hugging Face
-    текста почти нет: одна и та же разборка страниц на оба случая."""
+    Пайплайн (pipeline.py) зовёт её же, когда в фиде DeepMind, Hugging Face
+    или Mistral текста почти нет: одна и та же разборка страниц на оба случая."""
     soup = BeautifulSoup(html, "html.parser")
 
     og = soup.find("meta", property="og:title")

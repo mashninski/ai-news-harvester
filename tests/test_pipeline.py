@@ -494,6 +494,48 @@ def test_second_source_text_goes_to_generation(tmp_path):
     assert db.execute("SELECT COUNT(*) FROM article WHERE body != ''").fetchone()[0] == 0
 
 
+def test_mistral_page_fetch_gives_article_text(tmp_path, monkeypatch):
+    """Mistral (этап 8в): в фиде анонс в одно предложение — меньше MIN_BODY_ANY,
+    без докачки материал ушёл бы в failed. Докачка даёт текст статьи из
+    <article id="blogpost">: без меню, подвала и шапки статьи (дата, автор,
+    «Back to Blog»)."""
+    assert "mistral" in collect.VENDORS and "mistral" in pipeline.PAGE_FETCH_SOURCES
+    assert {"id": "mistral", "kind": "rss", "url": "https://mistral.ai/rss.xml"} in collect.SOURCES
+
+    page = (Path(__file__).resolve().parent / "fixtures" / "article_mistral.html").read_bytes()
+    url = "https://mistral.ai/news/hallo-deutschland/"
+    calls = []
+    monkeypatch.setattr(collect, "fetch", lambda u: calls.append(u) or page)
+
+    db = collect.open_state(tmp_path / "state.sqlite")
+    stamp = pipeline.now_iso()
+    teaser = "Mistral opens a Munich hub for Physics AI and Industrial AI research, partnering with German industry."
+    for src, u in (("mistral", url), ("techcrunch", "https://techcrunch.com/short")):
+        h = collect.url_hash(u)
+        db.execute("INSERT INTO seen (hash, url, source, title, published_at, first_seen_at, status)"
+                   " VALUES (?, ?, ?, 'Hallo, Deutschland!', ?, ?, 'new')", (h, u, src, stamp, stamp))
+        db.execute("INSERT INTO article (hash, body) VALUES (?, ?)", (h, teaser))
+    db.commit()
+    assert len(teaser) < pipeline.MIN_BODY_ANY
+
+    m = pipeline.material(db, collect.url_hash(url))
+    assert pipeline.ensure_body(db, m) is None
+    assert calls == [url] and m["from_page"]
+    assert m["body"].startswith("At Mistral, we have always believed")
+    assert m["body"].endswith("We are coming as a long-term technological partner.")
+    assert m["body"].count("\n\n") == 2                        # три абзаца статьи — и только они
+    assert len(m["body"]) >= pipeline.MIN_BODY_CHARS
+    for junk in ("Back to Blog", "September 28", "By Mistral", "cookies", "Build, test", "Industrial AI in Europe"):
+        assert junk not in m["body"]
+    assert pipeline.material(db, m["hash"])["body"] == m["body"]   # текст страницы — в состоянии
+
+    # Второй раз страница не качается
+    assert pipeline.ensure_body(db, pipeline.material(db, m["hash"])) is None and len(calls) == 1
+    # Тот же анонс у источника без докачки — пересказывать нечего
+    other = pipeline.material(db, collect.url_hash("https://techcrunch.com/short"))
+    assert "мала тэксту" in pipeline.ensure_body(db, other) and len(calls) == 1
+
+
 def test_without_second_source_text_prompt_is_as_before():
     item = {"source": "openai", "title": "t", "url": "u", "published_at": "2026-10-01T10:00:00Z", "body": "b",
             "also": [("willison", "w", ""), ("techcrunch", "tc")]}          # и прежний вид (source, title)
