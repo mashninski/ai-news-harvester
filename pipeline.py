@@ -226,12 +226,16 @@ def fail_step(db, h: str, back_to: str, error: str):
     attempts = db.execute("SELECT attempts FROM item WHERE hash = ?", (h,)).fetchone()[0] + 1
     stage = "failed" if attempts >= MAX_ATTEMPTS else back_to
     set_stage(db, h, stage, attempts=attempts, error=error[:500])
+    if stage == "failed":
+        forget_body(db, h)      # дальше материал никуда не пойдёт
     log.warning("%s: %s → %s (попытка %d): %s", h[:8], back_to, stage, attempts, error[:200])
 
 
 def forget_body(db, h: str):
-    """Текст статьи больше не нужен: в состоянии остаётся только нужное для дедупа."""
-    db.execute("UPDATE article SET body = '' WHERE hash = ?", (h,))
+    """Текст статьи больше не нужен: в состоянии остаётся только нужное для дедупа.
+    Вместе с ним — тексты его повторов из других источников."""
+    db.execute("UPDATE article SET body = '' WHERE hash = ? OR hash IN"
+               " (SELECT hash FROM seen WHERE primary_hash = ?)", (h, h))
 
 
 def material(db, h: str) -> dict:
@@ -239,13 +243,16 @@ def material(db, h: str) -> dict:
         "SELECT s.source, s.url, s.title, s.published_at, COALESCE(a.body, ''), COALESCE(a.from_page, 0)"
         " FROM seen s LEFT JOIN article a ON a.hash = s.hash WHERE s.hash = ?", (h,)).fetchone()
     source, url, title, pub, body, from_page = row
-    dups = db.execute("SELECT source, url, title FROM seen WHERE primary_hash = ? ORDER BY published_at",
-                      (h,)).fetchall()
+    # Повторы из других источников; текст есть только у пришедших в одном прогоне
+    # с основным (collect.collect) — у поздних и старых записей пусто
+    dups = db.execute(
+        "SELECT s.source, s.url, s.title, COALESCE(a.body, '') FROM seen s LEFT JOIN article a ON a.hash = s.hash"
+        " WHERE s.primary_hash = ? ORDER BY s.published_at", (h,)).fetchall()
     return {"hash": h, "source": source, "url": url, "title": title or "", "published_at": pub,
             "body": body, "from_page": bool(from_page),
-            "also": [(s, t) for s, _, t in dups],
+            "also": [(s, t, b) for s, _, t, b in dups],
             "sources": [{"source": source, "url": url, "title": title, "primary": True}]
-                       + [{"source": s, "url": u, "title": t, "primary": False} for s, u, t in dups]}
+                       + [{"source": s, "url": u, "title": t, "primary": False} for s, u, t, _ in dups]}
 
 
 def enroll_new(db, now: datetime) -> int:
@@ -257,8 +264,10 @@ def enroll_new(db, now: datetime) -> int:
         " WHERE status = 'new' AND hash NOT IN (SELECT hash FROM item)").fetchall()
     stamp = now_iso()
     for h, pub in rows:
-        db.execute("INSERT INTO item (hash, stage, updated_at) VALUES (?, ?, ?)",
-                   (h, "new" if pub >= cutoff else "too_old", stamp))
+        stage = "new" if pub >= cutoff else "too_old"
+        db.execute("INSERT INTO item (hash, stage, updated_at) VALUES (?, ?, ?)", (h, stage, stamp))
+        if stage == "too_old":
+            forget_body(db, h)
     db.commit()
     return len(rows)
 

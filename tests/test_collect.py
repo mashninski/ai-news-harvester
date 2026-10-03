@@ -298,6 +298,22 @@ def test_late_duplicate_attaches_to_already_emitted(db, monkeypatch):
     assert row == ("duplicate", primary.hash)
 
 
+def test_duplicate_body_is_kept_for_generation_but_not_late_ones(db, monkeypatch, tmp_path):
+    # Повтор из того же прогона — с текстом из фида: он уйдёт в генерацию вторым
+    # источником (этап 8б). Поздний повтор — без текста: основной уже мог уйти
+    res, _ = run(db, monkeypatch, [OPENAI, TECHCRUNCH])
+    primary = next(it for it in res.new if it.title == "Introducing GPT-6 Sol and Luna")
+    [dup] = primary.duplicates
+    body = db.execute("SELECT body FROM article WHERE hash = ?", (dup.hash,)).fetchone()[0]
+    assert body and body == collect.truncate_words(dup.body)
+
+    db2 = collect.open_state(tmp_path / "late.sqlite")
+    run(db2, monkeypatch, [OPENAI])
+    res, _ = run(db2, monkeypatch, [TECHCRUNCH])
+    [(late, _)] = res.late
+    assert db2.execute("SELECT 1 FROM article WHERE hash = ?", (late.hash,)).fetchone() is None
+
+
 def test_dry_run_writes_nothing(db, monkeypatch):
     monkeypatch.setattr(collect, "fetch", FakeNet())
     collect.collect(db, sources=[OPENAI], now=NOW, dry_run=True)

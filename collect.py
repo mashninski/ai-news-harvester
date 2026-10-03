@@ -11,7 +11,8 @@
   5. склеивает одну новость из разных источников по словам заголовка —
      и внутри прогона, и с отданным в прошлых прогонах за последние 72 часа;
   6. печатает список новых и записывает всё увиденное в состояние, а текст
-     новых материалов — в таблицу article для пайплайна (pipeline.py).
+     новых материалов и их повторов из этого прогона — в таблицу article
+     для пайплайна (pipeline.py).
 
 Сломанный источник (сеть, таймаут, HTTP-ошибка, битый XML) пропускается
 с предупреждением в лог, остальные собираются как обычно.
@@ -532,8 +533,13 @@ def collect(db: sqlite3.Connection, sources=SOURCES, now: datetime | None = None
              for d, p in late]
     rows += [(s.hash, s.url, s.source, s.title or None, s.published_at, stamp, "stale", None)
              for s in stale]
-    # Текст — только основным материалам: пайплайн берёт из состояния status = 'new'
+    # Текст — основным материалам (пайплайн берёт из состояния status = 'new')
+    # и их повторам из этого же прогона: текст первого повтора уходит в генерацию
+    # вторым источником (prompts.generate_user, этап 8б). Только то, что пришло
+    # в фиде, — страниц ради повторов не качаем. У поздних повторов (late)
+    # основной уже мог уйти в генерацию — их текст не храним
     bodies = [(p.hash, truncate_words(p.body)) for p in primaries]
+    bodies += [(d.hash, truncate_words(d.body)) for p in primaries for d in p.duplicates if d.body.strip()]
     if not dry_run:
         save(db, rows, bodies)
 

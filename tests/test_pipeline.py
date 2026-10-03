@@ -459,6 +459,49 @@ def test_generate_prompt_keeps_publication_date_out():
     assert "хто, калі" not in prompts.GENERATE_TASK
 
 
+def test_second_source_text_goes_to_generation(tmp_path):
+    # Этап 8б: у GPT-6.1 Sol второй источник (TechCrunch) с цифрами уходил
+    # в модель одним заголовком. Теперь — текст первого повтора с текстом
+    db = collect.open_state(tmp_path / "state.sqlite")
+    stamp = pipeline.now_iso()
+    rows = [("https://openai.com/news/sol", "openai", "Introducing Sol", "2026-10-01T10:00:00Z", None, "Vendor body."),
+            ("https://willison.net/sol", "willison", "Sol: notes", "2026-10-01T11:00:00Z", "p", ""),   # поздний — без текста
+            ("https://techcrunch.com/sol", "techcrunch", "OpenAI ships Sol", "2026-10-01T12:00:00Z", "p",
+             "TechCrunch word. " * 400),
+            ("https://mittr.com/sol", "mittr", "What Sol means", "2026-10-01T13:00:00Z", "p", "MIT body.")]
+    h = collect.url_hash(rows[0][0])
+    for url, src, title, pub, prim, body in rows:
+        hh = collect.url_hash(url)
+        db.execute("INSERT INTO seen VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                   (hh, url, src, title, pub, stamp, "duplicate" if prim else "new", h if prim else None))
+        if body:
+            db.execute("INSERT INTO article (hash, body) VALUES (?, ?)", (hh, body))
+    db.commit()
+    m = pipeline.material(db, h)
+    assert [s["source"] for s in m["sources"]] == ["openai", "willison", "techcrunch", "mittr"]
+    text = prompts.generate_user(m)
+    # Первый по порядку с текстом — TechCrunch; Willison (без текста) и MIT — заголовками
+    assert "Тэкст другой крыніцы — techcrunch: OpenAI ships Sol\n<source2>\n" in text
+    second = text.split("<source2>\n")[1].split("\n</source2>")[0]
+    assert len(second.split()) == prompts.SOURCE2_MAX_WORDS + 1 and second.endswith(" …")   # 600 слоў і «…»
+    assert "- willison: Sol: notes" in text and "- mittr: What Sol means" in text
+    assert "- techcrunch:" not in text and "MIT body." not in text
+    assert text.index("</source>") < text.index("<source2>")
+    assert "факты бяры з усіх крыніц; калі крыніцы разыходзяцца — так і пішы" in " ".join(
+        prompts.GENERATE_TASK.split())
+    # Карточка готова — стираются тексты и основного, и повторов
+    pipeline.forget_body(db, h)
+    assert db.execute("SELECT COUNT(*) FROM article WHERE body != ''").fetchone()[0] == 0
+
+
+def test_without_second_source_text_prompt_is_as_before():
+    item = {"source": "openai", "title": "t", "url": "u", "published_at": "2026-10-01T10:00:00Z", "body": "b",
+            "also": [("willison", "w", ""), ("techcrunch", "tc")]}          # и прежний вид (source, title)
+    text = prompts.generate_user(item)
+    assert "<source2>" not in text
+    assert "(толькі загалоўкі, для кантэксту):\n- willison: w\n- techcrunch: tc\n" in text
+
+
 @needs_node
 def test_names_convert_to_be():
     # write → конвертер (с guard-словарём, как в пайплайне) → be. Разошлось —

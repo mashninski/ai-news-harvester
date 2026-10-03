@@ -21,6 +21,8 @@ import re
 from functools import lru_cache
 from pathlib import Path
 
+from collect import truncate_words
+
 # Категории для фильтра на сайте (план, этап 6). Ключ — стабильный id для JSON
 # карточки, значение — подпись.
 CATEGORIES = {
@@ -279,7 +281,9 @@ def _generate_task(tarask: bool) -> str:
     return f"""ЗАДАЧА. Ты пішаш картку для беларускай стужкі навін пра штучны інтэлект. \
 Табе даюць адзін матэрыял з англамоўнай крыніцы. Зрабі пераказ — не пераклад: \
 факты сваімі словамі, з атрыбуцыяй меркаванняў. Толькі тое, што ёсць у крыніцы; \
-нічога не дадумвай, лічбы і імёны — дакладна як у крыніцы.
+нічога не дадумвай, лічбы і імёны — дакладна як у крыніцы. \
+Калі тэкстаў крыніц два (<source> і <source2>), факты бяры з усіх крыніц; калі \
+крыніцы разыходзяцца — так і пішы.
 
 {orth} Тэрміны — па \
 глосарыі, стыль — па стайлгайдзе, русізмы і калькі з антыкалькавага слоўніка — \
@@ -337,15 +341,32 @@ GENERATE_SCHEMA = {
 }
 
 
+# Второй источник в генерации (этап 8б, ai-news-plan.md сайта): у GPT-6.1 Sol
+# второй источник — TechCrunch с цифрами, а пересказ вышел «фактов нет»: повтор
+# уходил в модель одним заголовком (журнал сайта, 03.10.2026). Текст — одного
+# повтора, первого с текстом, не длиннее этого: ≈ +1000 токенов входа на карточку
+SOURCE2_MAX_WORDS = 600
+
+
 def generate_user(item: dict) -> str:
-    """item: source, title, url, published_at, body, also — [(source, title)] склеенных повтораў."""
-    also = "".join(f"\n- {s}: {t}" for s, t in item.get("also", []))
+    """item: source, title, url, published_at, body, also — склеенные повторы
+    [(source, title, body)], body пустой у позднего повтора. Первый повтор
+    с текстом идёт блоком <source2>, остальные — заголовками, как раньше."""
+    also = [(a[0], a[1], a[2] if len(a) > 2 else "") for a in item.get("also", [])]
+    i2 = next((i for i, a in enumerate(also) if a[2].strip()), None)
+    rest = "".join(f"\n- {s}: {t}" for i, (s, t, _) in enumerate(also) if i != i2)
+    second = ""
+    if i2 is not None:
+        s, t, body = also[i2]
+        second = (f"\n\nТэкст другой крыніцы — {s}: {t}\n"
+                  f"<source2>\n{truncate_words(body.strip(), SOURCE2_MAX_WORDS)}\n</source2>")
     return (
         f"Крыніца: {item['source']}\n"
         f"Дата публікацыі (для арыентацыі ў часе, у тэкст не пішы): {item.get('published_at') or 'невядома'}\n"
         f"Загаловак: {item['title']}\nСпасылка: {item['url']}\n"
-        + (f"Тая ж навіна ў іншых крыніцах (толькі загалоўкі, для кантэксту):{also}\n" if also else "")
+        + (f"Тая ж навіна ў іншых крыніцах (толькі загалоўкі, для кантэксту):{rest}\n" if rest else "")
         + f"\nТэкст крыніцы:\n<source>\n{item['body']}\n</source>"
+        + second
     )
 
 
