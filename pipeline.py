@@ -26,12 +26,13 @@ Batch API асинхронный: отправленное сегодня при
     python pipeline.py --wait     # ходить по кругу, пока все батчи не вернутся
     python pipeline.py --status   # только показать, что где лежит и сколько потрачено
 
-Предохранители бюджета (журнал сайта, 02.10.2026, «Этап 8а»): не больше
-MAX_GENERATE_PER_RUN генераций за запуск и MAX_GENERATE_PER_DAY за сутки
-по Мінску; месячный бюджет AI_NEWS_MONTHLY_BUDGET_USD (по умолчанию $11)
-по оценкам таблицы batch ×COST_FACTOR (сейчас 1,0 — без множителя). Бюджет
-исчерпан — новые батчи не отправляются, готовые забираются, выход с кодом 0
-и предупреждением.
+Предохранители бюджета (журнал сайта, 02.10.2026, «Этап 8а»; пересмотрены
+03.10.2026, «потолок 10 в сутки снят»): не больше MAX_GENERATE_PER_RUN
+генераций за запуск и MAX_GENERATE_PER_DAY за сутки по Мінску — аварийные
+потолки, а не норма: лента берёт всё, что прошло triage; месячный бюджет
+AI_NEWS_MONTHLY_BUDGET_USD (по умолчанию $16) по оценкам таблицы batch
+×COST_FACTOR (сейчас 1,0 — без множителя). Бюджет исчерпан — новые батчи
+не отправляются, готовые забираются, выход с кодом 0 и предупреждением.
 
 Ключ — переменная окружения AI_NEWS_ANTHROPIC_KEY (llm.py).
 Орфография карточек — AI_NEWS_ORTHOGRAPHY: narkamauka (по умолчанию) или tarask.
@@ -60,13 +61,19 @@ ROOT = Path(__file__).resolve().parent
 CARDS_DIR = ROOT / "output" / "cards"
 
 MAX_ATTEMPTS = 3            # столько раз этап может не удаться, потом failed
-MAX_GENERATE_PER_RUN = 5    # потолок генераций за запуск: страховка от случайной траты
-MAX_GENERATE_PER_DAY = 10   # потолок генераций за сутки по Мінску, считается по таблице batch
+# Аварийный потолок генераций за сутки по Мінску, считается по таблице batch.
+# Не норма: лента берёт всё, что прошло triage (решение автора 03.10.2026,
+# журнал сайта, «потолок 10 в сутки снят»). 40 — вдвое выше ожидаемых ~20
+# в сутки: ловит ошибку вроде повторной генерации всей очереди, а лишнее
+# в день наплыва новостей уходит в следующий суточный батч
+MAX_GENERATE_PER_DAY = 40
+# Потолок за запуск — не меньше суточного: суточный батч должен взять все 40
+MAX_GENERATE_PER_RUN = MAX_GENERATE_PER_DAY
 # Месячный бюджет API по оценкам пайплайна. Решение автора 03.10.2026 (журнал
-# сайта, «бюджет ≈ $11/мес, этап 8б»; ai-news-plan.md сайта, «Этап 8б»):
-# ≈ $11/мес при 10 карточках в сутки с fix, лимит консоли $12 — последняя линия
+# сайта, «потолок 10 в сутки снят»; ai-news-plan.md сайта, «Этап 8г»):
+# ≈ $8–16/мес при всех новостях с fix, лимит консоли $17 — последняя линия
 BUDGET_ENV = "AI_NEWS_MONTHLY_BUDGET_USD"
-DEFAULT_MONTHLY_BUDGET = 11.0
+DEFAULT_MONTHLY_BUDGET = 16.0
 # Множитель к оценке usage_cost. До 03.10.2026 был 1,5 (оценка занижала счёт
 # консоли в 1,6 раза, журнал сайта, 25.09.2026); с 03.10.2026 — 1,0, решение
 # и причина — та же запись журнала, что и для бюджета
@@ -163,7 +170,7 @@ def monthly_budget() -> float:
     try:
         value = float(raw)
     except ValueError:
-        raise SystemExit(f"{BUDGET_ENV}={raw!r}: патрэбны лік у доларах, напрыклад 11")
+        raise SystemExit(f"{BUDGET_ENV}={raw!r}: патрэбны лік у доларах, напрыклад 16")
     if value < 0:
         raise SystemExit(f"{BUDGET_ENV}={raw!r}: бюджэт не можа быць адмоўным")
     return value
@@ -438,9 +445,9 @@ def generate_request(res: Resources, m: dict) -> dict:
 
 
 def expire_triaged(db, now: datetime) -> int:
-    """Ждущее генерации дольше окна свежести — too_old. При потолке генераций
-    в сутки отобранного triage бывает больше, чем успевает генерация, и хвост
-    очереди иначе дождался бы своей карточки через неделю."""
+    """Ждущее генерации дольше окна свежести — too_old. Упрётся очередь
+    в потолок генераций или бюджет — хвост иначе дождался бы своей карточки
+    через неделю."""
     cutoff = collect.iso(now - timedelta(days=collect.MAX_AGE_DAYS))
     rows = db.execute("SELECT i.hash FROM item i JOIN seen s ON s.hash = i.hash WHERE i.stage = 'triaged'"
                       " AND COALESCE(s.published_at, s.first_seen_at) < ?", (cutoff,)).fetchall()
@@ -452,8 +459,8 @@ def expire_triaged(db, now: datetime) -> int:
 
 
 def submit_generate(db, client, res: Resources, limit: int = MAX_GENERATE_PER_RUN) -> str | None:
-    # Самые важные первыми, внутри важности — самые свежие: потолок генераций
-    # в сутки (MAX_GENERATE_PER_DAY) меньше, чем triage отбирает, и «старые
+    # Самые важные первыми, внутри важности — самые свежие: в день наплыва
+    # отобранного больше аварийного потолка (MAX_GENERATE_PER_DAY), и «старые
     # первыми» превратили бы ленту в новости недельной давности
     rows = db.execute("SELECT i.hash FROM item i JOIN seen s ON s.hash = i.hash WHERE i.stage = 'triaged'"
                       " ORDER BY i.importance DESC, COALESCE(s.published_at, s.first_seen_at) DESC, i.updated_at"

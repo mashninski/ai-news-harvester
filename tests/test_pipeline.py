@@ -600,14 +600,16 @@ NOW = collect.parse_iso("2026-10-02T21:30:00Z")   # 00:30 3 кастрычнік
 def test_generation_capped_per_run(tmp_path, site, monkeypatch):
     monkeypatch.delenv(pipeline.BUDGET_ENV, raising=False)
     db = collect.open_state(tmp_path / "state.sqlite")
+    # Суточный батч берёт весь аварийный потолок за раз
+    assert pipeline.MAX_GENERATE_PER_RUN >= pipeline.MAX_GENERATE_PER_DAY == 40
     triaged(db, 8)
     client = fake_client(answers)
-    pipeline.run_once(db, client, pipeline.Resources(site, "narkamauka"), now=NOW)
-    assert generate_requests(client) == [pipeline.MAX_GENERATE_PER_RUN] == [5]
+    pipeline.run_once(db, client, pipeline.Resources(site, "narkamauka"), limit=5, now=NOW)
+    assert generate_requests(client) == [5]
     # Тот же процесс (--wait) второй раз за запуск не генерирует
     started = collect.iso(NOW)
     db.execute("UPDATE batch SET submitted_at = ?", (started,))
-    pipeline.run_once(db, client, pipeline.Resources(site, "narkamauka"), now=NOW, run_started=started)
+    pipeline.run_once(db, client, pipeline.Resources(site, "narkamauka"), limit=5, now=NOW, run_started=started)
     assert generate_requests(client) == [5]
 
 
@@ -617,14 +619,14 @@ def test_generation_capped_per_minsk_day(tmp_path, site, monkeypatch):
     triaged(db, 8)
     # 23:00 2 кастрычніка па Мінску — учорашнія суткі, не лічацца
     past_batch(db, "old", "generate", 9, "2026-10-02T20:00:00Z", 0.1)
-    # 00:10 3 кастрычніка па Мінску — сённяшнія: 8 з 10
-    past_batch(db, "today", "generate", 8, "2026-10-02T21:10:00Z", 0.1)
+    # 00:10 3 кастрычніка па Мінску — сённяшнія: 38 з 40
+    past_batch(db, "today", "generate", 38, "2026-10-02T21:10:00Z", 0.1)
     past_batch(db, "tri", "triage", 50, "2026-10-02T21:10:00Z", 0.01)   # triage у потолок не идёт
     client = fake_client(answers)
     res = pipeline.Resources(site, "narkamauka")
     pipeline.run_once(db, client, res, now=NOW)
     assert generate_requests(client) == [2]
-    assert pipeline.budget_state(db, NOW)["today"] == 10
+    assert pipeline.budget_state(db, NOW)["today"] == 40
     pipeline.run_once(db, client, res, now=NOW)                      # потолок суток — больше ничего
     assert generate_requests(client) == [2]
     assert db.execute("SELECT COUNT(*) FROM item WHERE stage = 'triaged'").fetchone()[0] == 6
@@ -637,14 +639,14 @@ def test_monthly_budget_stops_new_batches_but_collects_ready(tmp_path, site, mon
     monkeypatch.setattr(pipeline, "CARDS_DIR", tmp_path / "cards")
     db = collect.open_state(tmp_path / "state.sqlite")
     past_batch(db, "sept", "generate", 10, "2026-09-25T12:00:00Z", 100.0)   # прошлы месяц не лічыцца
-    past_batch(db, "oct", "generate", 10, "2026-10-01T12:00:00Z", 5.0)      # 5 < 11, множителя нет
+    past_batch(db, "oct", "generate", 10, "2026-10-01T12:00:00Z", 5.0)      # 5 < 16, множителя нет
     triaged(db, 3)
     client = fake_client(answers)
     res = pipeline.Resources(site, "narkamauka")
     pipeline.run_once(db, client, res, now=NOW)
     assert generate_requests(client) == [3]                    # бюджет ещё есть
-    # Отправленный батч забирается и в нём ещё $6,20: 11,2 ≥ 11
-    db.execute("UPDATE batch SET usage = ? WHERE id = 'oct'", (json.dumps({"tokens": {}, "usd": 11.2}),))
+    # Прошлые батчи месяца вместе — $16,20: 16,2 ≥ 16
+    db.execute("UPDATE batch SET usage = ? WHERE id = 'oct'", (json.dumps({"tokens": {}, "usd": 16.2}),))
     seed_more = triaged(db, 2)
     pipeline.run_once(db, client, res, now=NOW)
     assert generate_requests(client) == [3]                    # новых батчей нет
@@ -672,8 +674,8 @@ def test_status_prints_month_budget_and_day(tmp_path, monkeypatch, capsys):
     past_batch(db, "b", "triage", 30, "2026-09-30T10:00:00Z", 1.0)        # верасень
     pipeline.status(db, NOW)
     out = capsys.readouterr().out
-    assert "потрачено ≈ $0.2000 (оценка ×1.0) из $11.00" in out
-    assert "осталось ≈ $10.8000" in out and "за сутки по Мінску: 4 из 10" in out
+    assert "потрачено ≈ $0.2000 (оценка ×1.0) из $16.00" in out
+    assert "осталось ≈ $15.8000" in out and "за сутки по Мінску: 4 из 40" in out
 
 
 def test_generation_takes_important_then_freshest_and_expires_stale(tmp_path, site, monkeypatch):
