@@ -3,7 +3,9 @@
 «запуске», забор в следующем."""
 
 import json
+import re
 import shutil
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace as NS
 
@@ -706,3 +708,122 @@ def test_generate_prompt_asks_each_layer_to_add_something_new():
         assert "retelling не пачынаецца з тэзіса" in task
         assert "Першы абзац — што здарылася і хто." not in task   # прежняя формулировка вела к повтору
         assert '"' not in prompts.LAYERS                           # прямая кавычка обрывает поле ответа
+
+
+# ---------- генерация и fix раз в сутки ----------
+# Журнал сайта, 03.10.2026, «Этап 8г»: справочный блок кэшируется на час,
+# прогоны — раз в 2 часа, поэтому генерация и fix — по батчу в сутки, в своих
+# прогонах цепочки 23:17 → 01:17 → 03:17 → 05:17 UTC
+
+WORKFLOW = Path(__file__).resolve().parent.parent / ".github" / "workflows" / "harvest.yml"
+
+
+def test_generation_only_when_allowed(tmp_path, site, monkeypatch):
+    monkeypatch.delenv(pipeline.BUDGET_ENV, raising=False)
+    db = collect.open_state(tmp_path / "state.sqlite")
+    triaged(db, 3)
+    client = fake_client(answers)
+    res = pipeline.Resources(site, "narkamauka")
+    pipeline.run_once(db, client, res, generate=False, fix=False)    # обычный прогон
+    assert generate_requests(client) == []
+    pipeline.run_once(db, client, res, generate=True, fix=False)     # прогон генерации или галка generate
+    assert generate_requests(client) == [3]
+
+
+def all_calqued(stage, params):
+    """Как answers, но у каждой карточки калька — каждая идёт на fix."""
+    ans = answers(stage, params)
+    if stage == "generate":
+        ans["retelling"] = "Мадэль з'яўляецца найбольшай. Другі сказ."
+    return ans
+
+
+def fix_requests(client):
+    b = client.messages.batches
+    return [len(b.store[i]["requests"]) for i in b.created
+            if b.store[i]["requests"][0]["custom_id"].startswith("f-")]
+
+
+def test_fix_at_most_once_a_day(tmp_path, site, monkeypatch):
+    monkeypatch.delenv(pipeline.BUDGET_ENV, raising=False)
+    monkeypatch.setattr(pipeline, "CARDS_DIR", tmp_path / "cards")
+    db = collect.open_state(tmp_path / "state.sqlite")
+    res = pipeline.Resources(site, "narkamauka")
+    client = fake_client(all_calqued)
+    now = datetime.now(timezone.utc)      # submit пишет настоящее время отправки
+    triaged(db, 1)
+    pipeline.run_once(db, client, res, now=now, generate=True, fix=False)
+    pipeline.run_once(db, client, res, now=now, generate=False, fix=True)   # забрал генерацию, отправил fix
+    assert fix_requests(client) == [1]
+    # Ещё одна генерация в те же сутки (ручная галка) — её fix ждёт
+    triaged(db, 1)
+    pipeline.run_once(db, client, res, now=now, generate=True, fix=False)
+    pipeline.run_once(db, client, res, now=now + timedelta(hours=2), generate=False, fix=True)
+    assert fix_requests(client) == [1]
+    assert db.execute("SELECT COUNT(*) FROM item WHERE stage = 'linted'").fetchone()[0] == 1
+    # Через сутки — следующий fix
+    pipeline.run_once(db, client, res, now=now + timedelta(hours=24), generate=False, fix=True)
+    assert fix_requests(client) == [1, 1]
+
+
+def test_daily_chain_cards_reach_publication(tmp_path, site, monkeypatch):
+    import publish
+    monkeypatch.delenv(pipeline.BUDGET_ENV, raising=False)
+    monkeypatch.setattr(pipeline, "CARDS_DIR", tmp_path / "cards")
+    db = collect.open_state(tmp_path / "state.sqlite")
+    h0, h1, h2 = seed(db)
+    res = pipeline.Resources(site, "narkamauka")
+    client = fake_client(answers)
+    # Прогоны суток с флагами, как их ставит воркфлоу (сверяет тест ниже)
+    chain = [("21:17", False, False),    # triage
+             ("23:17", True, False),     # triage забран, генерация отправлена
+             ("01:17", False, True),     # генерация забрана, чистая карточка готова, fix отправлен
+             ("03:17", False, False)]    # fix забран
+    for _, gen, fix in chain:
+        pipeline.run_once(db, client, res, generate=gen, fix=fix)
+    assert generate_requests(client) == [2] and fix_requests(client) == [1]
+    stages = dict(db.execute("SELECT hash, stage FROM item"))
+    assert stages[h0] == "rejected" and stages[h1] == stages[h2] == "draft"
+    # 05:17 — публикация видит обе карточки цепочки
+    cards, broken = publish.load_cards(tmp_path / "cards")
+    plan = publish.plan_pr(cards, broken, publish.done_ids(db), "main", datetime.now(timezone.utc))
+    assert sorted(e.card["id"] for e in plan.entries) == sorted([h1, h2]) and not broken
+
+
+def test_status_shows_waiting_by_publication_day(tmp_path, monkeypatch, capsys):
+    monkeypatch.delenv(pipeline.BUDGET_ENV, raising=False)
+    db = collect.open_state(tmp_path / "state.sqlite")
+    hs = triaged(db, 3)
+    when = ["2026-10-01T10:00:00Z", "2026-10-02T22:30:00Z",   # 01:30 3 кастрычніка па Мінску
+            "2026-10-02T12:00:00Z"]
+    for h, pub in zip(hs, when):
+        db.execute("UPDATE seen SET published_at = ? WHERE hash = ?", (pub, h))
+    db.commit()
+    assert pipeline.waiting_by_day(db) == [("01.10", 1), ("02.10", 1), ("03.10", 1)]
+    pipeline.status(db, NOW)
+    assert "Отобрано и ждёт генерации: 3 — по дням публикации (Мінск): 01.10: 1, 02.10: 1, 03.10: 1" \
+        in capsys.readouterr().out
+    assert pipeline.waiting_line(collect.open_state(tmp_path / "empty.sqlite")) == "Отобрано и ждёт генерации: 0"
+
+
+def cron_hours(wf: str) -> list[list[int]]:
+    lines = re.findall(r'- cron: "17 ([\d,]+) \* \* \*"', wf)
+    return [[int(h) for h in line.split(",")] for line in lines]
+
+
+def test_workflow_generates_and_fixes_once_a_day():
+    wf = WORKFLOW.read_text(encoding="utf-8")
+    hours = cron_hours(wf)
+    flat = sorted(h for line in hours for h in line)
+    # Раз в 2 часа по нечётным часам, каждый час — ровно в одной строке
+    assert flat == list(range(1, 24, 2))
+    # Генерация, fix и публикация — каждая своей строкой из одного часа:
+    # по строке (github.event.schedule) прогон себя и узнаёт
+    assert [23] in hours and [1] in hours and [5] in hours
+    assert "GENERATE: ${{ github.event.schedule == '17 23 * * *' || inputs.generate == true }}" in wf
+    assert "FIX: ${{ github.event.schedule == '17 1 * * *' }}" in wf
+    assert "PUBLISH: ${{ github.event.schedule == '17 5 * * *' || inputs.publish == true }}" in wf
+    # Цепочка: генерация → (+2 ч) забор и fix → (+2 ч) забор fix → (+2 ч) публикация
+    assert (23 + 2) % 24 == 1 and 1 + 4 == 5
+    assert "generate:" in wf and 'args+=(--generate)' in wf and 'args+=(--fix)' in wf
+    assert '"$GENERATE" == "true"' in wf and '"$FIX" == "true"' in wf

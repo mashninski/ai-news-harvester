@@ -368,7 +368,7 @@ def test_workflow_publishes_once_a_day_or_by_hand():
     # Прогон публикации узнаётся по строке расписания: она должна совпадать
     # в списке cron и в условии PUBLISH, а других прогонов в 05:17 быть не должно
     assert '- cron: "17 5 * * *"' in wf and "github.event.schedule == '17 5 * * *'" in wf
-    assert '- cron: "17 1,3,7,9,11,13,15,17,19,21,23 * * *"' in wf
+    assert '- cron: "17 3,7,9,11,13,15,17,19,21 * * *"' in wf
     assert "inputs.publish == true" in wf and "env.PUBLISH == 'true'" in wf
 
 

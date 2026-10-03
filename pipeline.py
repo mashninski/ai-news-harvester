@@ -22,8 +22,14 @@ Batch API асинхронный: отправленное сегодня при
 всё, что ждёт своего шага (таблица item). Запуск можно повторять сколько
 угодно — ничего не отправится дважды и не потеряется при падении процесса.
 
-    python pipeline.py            # один проход: забрать готовое, отправить новое
-    python pipeline.py --wait     # ходить по кругу, пока все батчи не вернутся
+Генерация и fix — только по флагам --generate и --fix: в Actions это один
+прогон в сутки для каждого (журнал сайта, 03.10.2026, «Этап 8г»). Справочный
+блок кэшируется на час, а прогоны идут раз в 2 часа: батч в каждом прогоне
+платил бы запись кэша заново. Triage — в каждом запуске: он без кэша.
+
+    python pipeline.py                      # забрать готовое, отправить triage
+    python pipeline.py --generate --fix     # то же плюс генерация и fix
+    python pipeline.py --wait --generate --fix   # ходить по кругу, пока все батчи не вернутся
     python pipeline.py --status   # только показать, что где лежит и сколько потрачено
 
 Предохранители бюджета (журнал сайта, 02.10.2026, «Этап 8а»; пересмотрены
@@ -78,6 +84,11 @@ DEFAULT_MONTHLY_BUDGET = 16.0
 # консоли в 1,6 раза, журнал сайта, 25.09.2026); с 03.10.2026 — 1,0, решение
 # и причина — та же запись журнала, что и для бюджета
 COST_FACTOR = 1.0
+# Fix — не чаще раза в сутки (журнал сайта, 03.10.2026, «Этап 8г»): каждый
+# батч fix пишет справочный блок в кэш заново. Расписание и так даёт fix один
+# прогон в сутки; это страховка от перезапуска того же прогона. 20 часов,
+# а не 24: прогон в очереди Actions опаздывает, и вчерашний fix мог уйти позже
+FIX_MIN_INTERVAL = timedelta(hours=20)
 MINSK = timezone(timedelta(hours=3))   # в Беларуси перевода часов нет
 MIN_BODY_CHARS = 400        # меньше — текста для пересказа мало
 MIN_BODY_ANY = 150          # меньше и докачать нельзя — пересказывать нечего
@@ -201,6 +212,32 @@ def budget_state(db, now: datetime) -> dict:
     spent = spent_since(db, month) * COST_FACTOR
     return {"budget": budget, "spent": spent, "left": max(0.0, budget - spent),
             "exhausted": spent >= budget, "today": generated_since(db, day), "month": month}
+
+
+def fix_sent_recently(db, now: datetime) -> bool:
+    since = collect.iso(now - FIX_MIN_INTERVAL)
+    return db.execute("SELECT 1 FROM batch WHERE stage = 'fix' AND submitted_at >= ? LIMIT 1",
+                      (since,)).fetchone() is not None
+
+
+def waiting_by_day(db) -> list[tuple[str, int]]:
+    """Отобранное triage и ждущее генерации — по дням публикации по Мінску,
+    старые первыми: [(«01.10», 5), …]."""
+    days: dict[str, int] = {}
+    for (pub,) in db.execute("SELECT COALESCE(s.published_at, s.first_seen_at) FROM item i"
+                             " JOIN seen s ON s.hash = i.hash WHERE i.stage = 'triaged'"):
+        key = collect.parse_iso(pub).astimezone(MINSK).strftime("%Y-%m-%d")
+        days[key] = days.get(key, 0) + 1
+    return [(f"{k[8:10]}.{k[5:7]}", n) for k, n in sorted(days.items())]
+
+
+def waiting_line(db) -> str:
+    days = waiting_by_day(db)
+    total = sum(n for _, n in days)
+    if not total:
+        return "Отобрано и ждёт генерации: 0"
+    return (f"Отобрано и ждёт генерации: {total} — по дням публикации (Мінск): "
+            + ", ".join(f"{d}: {n}" for d, n in days))
 
 
 def budget_line(b: dict) -> str:
@@ -689,15 +726,18 @@ def status(db, now: datetime | None = None):
     for bid, stage, sub in db.execute(
             "SELECT id, stage, submitted_at FROM batch WHERE collected_at IS NULL"):
         print(f"  в работе: батч {stage} {bid} с {sub}")
+    print(waiting_line(db))
     print(f"Потрачено по забранным батчам: ≈ ${spent_since(db, ''):.4f} (оценка, за всё время)")
     print(budget_line(budget_state(db, now)))
 
 
 def run_once(db, client, res: Resources, limit: int = MAX_GENERATE_PER_RUN,
-             now: datetime | None = None, run_started: str | None = None) -> int:
+             now: datetime | None = None, run_started: str | None = None,
+             generate: bool = True, fix: bool = True) -> int:
     """Забрать готовое, отправить новое в пределах потолков. run_started — начало
     процесса: потолок за запуск считается по батчам с этого момента (--wait
-    проходит run_once много раз)."""
+    проходит run_once много раз). generate и fix — можно ли в этом запуске
+    отправлять батчи генерации и fix; triage идёт всегда."""
     now = now or datetime.now(timezone.utc)
     pending = collect_batches(db, client, res)
     enroll_new(db, now)
@@ -710,13 +750,16 @@ def run_once(db, client, res: Resources, limit: int = MAX_GENERATE_PER_RUN,
                  warning=True)
         return pending
     this_run = generated_since(db, run_started) if run_started else 0
-    allowed = max(0, min(limit - this_run, MAX_GENERATE_PER_DAY - b["today"]))
-    if allowed == 0 and db.execute("SELECT 1 FROM item WHERE stage = 'triaged' LIMIT 1").fetchone():
+    allowed = max(0, min(limit - this_run, MAX_GENERATE_PER_DAY - b["today"])) if generate else 0
+    if generate and allowed == 0 and db.execute("SELECT 1 FROM item WHERE stage = 'triaged' LIMIT 1").fetchone():
         why = "за сутки" if b["today"] >= MAX_GENERATE_PER_DAY else "за запуск"
         print(f"Потолок генераций {why} достигнут — генерация ждёт следующего запуска")
+    fix_now = fix and not fix_sent_recently(db, now)
+    if fix and not fix_now and db.execute("SELECT 1 FROM item WHERE stage = 'linted' LIMIT 1").fetchone():
+        print("Fix уже отправлялся за последние сутки — исправления ждут следующего")
     for sub in (submit_triage(db, client),
                 submit_generate(db, client, res, allowed) if allowed else None,
-                submit_fix(db, client, res)):
+                submit_fix(db, client, res) if fix_now else None):
         pending += sub is not None
     return pending
 
@@ -728,6 +771,8 @@ def main():
     ap.add_argument("--poll", type=int, default=60, help="секунд между проверками при --wait")
     ap.add_argument("--max-wait", type=int, default=120, help="минут ждать при --wait, потом выйти")
     ap.add_argument("--limit", type=int, default=MAX_GENERATE_PER_RUN, help="генераций за запуск")
+    ap.add_argument("--generate", action="store_true", help="отправлять батч генерации")
+    ap.add_argument("--fix", action="store_true", help="отправлять батч fix (не чаще раза в сутки)")
     ap.add_argument("--status", action="store_true", help="только показать состояние")
     args = ap.parse_args()
 
@@ -747,12 +792,18 @@ def main():
     started = now_iso()
     deadline = time.monotonic() + args.max_wait * 60
     while True:
-        pending = run_once(db, client, res, args.limit, run_started=started)
+        pending = run_once(db, client, res, args.limit, run_started=started,
+                           generate=args.generate, fix=args.fix)
         if not args.wait or not pending or time.monotonic() > deadline:
             break
         time.sleep(args.poll)
     status(db)
-    announce(budget_line(budget_state(db, datetime.now(timezone.utc))), echo=False)   # в лог уже напечатал status
+    if not args.generate and waiting_by_day(db):
+        announce("Генерация в этом прогоне не отправляется: раз в сутки по расписанию"
+                 " или вручную — Run workflow с галкой generate")
+    # В лог это уже напечатал status, здесь — только в summary прогона
+    announce(waiting_line(db), echo=False)
+    announce(budget_line(budget_state(db, datetime.now(timezone.utc))), echo=False)
 
 
 if __name__ == "__main__":
