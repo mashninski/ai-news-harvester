@@ -27,8 +27,8 @@ import requests
 
 import collect
 
+# Ars Technica AI — уже в collect.SOURCES (этап 8в)
 CANDIDATES = {
-    "Ars Technica AI": ["https://arstechnica.com/ai/feed/"],
     "Meta AI blog": ["https://ai.meta.com/blog/rss/", "https://ai.meta.com/blog/feed/"],
     "Mistral AI": ["https://mistral.ai/news/rss.xml", "https://mistral.ai/rss.xml"],
     "Microsoft AI": ["https://blogs.microsoft.com/ai/feed/", "https://microsoft.ai/feed/"],

@@ -23,8 +23,10 @@ TECHCRUNCH = {"id": "techcrunch", "kind": "rss", "url": "https://feeds.test/tech
 WILLISON = {"id": "willison", "kind": "rss", "url": "https://feeds.test/willison.xml"}
 ANTHROPIC = {"id": "anthropic", "kind": "sitemap", "url": "https://www.anthropic.com/sitemap.xml"}
 BROKEN = {"id": "broken", "kind": "rss", "url": "https://feeds.test/broken.xml"}
+ARS = {"id": "arstechnica", "kind": "rss", "url": "https://feeds.test/arstechnica.xml"}
 
 ROUTES = {
+    ARS["url"]: "feed_arstechnica.xml",
     OPENAI["url"]: "feed_openai.xml",
     TECHCRUNCH["url"]: "feed_techcrunch.xml",
     WILLISON["url"]: "feed_willison.xml",
@@ -144,6 +146,35 @@ def test_bad_entry_skips_only_itself(db, monkeypatch, caplog):
     assert res.failed == {}
     assert len(res.new) == 2
     assert any("пропущена запись" in r.message for r in caplog.records)
+
+
+def test_arstechnica_portal_text_from_feed_and_freshness_window(db, monkeypatch):
+    """Ars Technica (этап 8в) — портал, как TechCrunch: текст — content:encoded
+    фида, а не анонс из description; хвостовые ссылки «Read full article»
+    и «Comments» в текст не идут; старше окна — stale; пост вендора о той же
+    новости остаётся основным."""
+    src = next(s for s in collect.SOURCES if s["id"] == "arstechnica")
+    assert src == {"id": "arstechnica", "kind": "rss", "url": "https://arstechnica.com/ai/feed/"}
+    assert "arstechnica" not in collect.VENDORS
+
+    res, _ = run(db, monkeypatch, [OPENAI, ARS])
+    assert res.failed == {} and res.stale == 1
+    assert "Judge dismisses antitrust lawsuits over AI search answers" in titles(res)
+    assert "An older Ars story about chip export rules" not in titles(res)
+
+    by_title = {it.title: it for it in res.new}
+    [ars] = by_title["Introducing GPT-6 Sol and Luna"].duplicates
+    assert ars.source == "arstechnica"
+    assert ars.body == "OpenAI released two models on Tuesday.\n\nSol is the larger one."
+    judge = by_title["Judge dismisses antitrust lawsuits over AI search answers"]
+    assert judge.body == "A federal judge dismissed two lawsuits."
+
+
+def test_feed_link_lines_are_not_text():
+    html = "<p>Body.</p><p><a href='x'>Read full article</a></p>\n<p><a href='x#c'>Comments</a></p>"
+    assert collect.html_to_text(html) == "Body."
+    # Слово внутри абзаца — текст, его не трогаем
+    assert collect.html_to_text("<p>Comments were closed.</p>") == "Comments were closed."
 
 
 def test_all_sources_failed_is_an_error(db, monkeypatch):

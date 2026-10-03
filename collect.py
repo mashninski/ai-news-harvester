@@ -3,7 +3,7 @@
 Коллектор новостей об ИИ для раздела mashninski.com/naviny — этап 3 плана.
 
 Что делает за один прогон:
-  1. скачивает 7 RSS/Atom-фидов и sitemap Anthropic (у него нет RSS);
+  1. скачивает 8 RSS/Atom-фидов и sitemap Anthropic (у него нет RSS);
   2. приводит всё к виду {source, url, published_at, title, body, hash};
   3. отбрасывает уже виденное — по нормализованному URL, против data/state.sqlite;
   4. отбрасывает старше MAX_AGE_DAYS — в фидах OpenAI и Hugging Face лежит весь
@@ -59,11 +59,14 @@ SOURCES = [
     {"id": "venturebeat", "kind": "rss",    "url": "https://venturebeat.com/category/ai/feed/"},
     {"id": "mittr",      "kind": "rss",     "url": "https://www.technologyreview.com/topic/artificial-intelligence/feed"},
     {"id": "willison",   "kind": "rss",     "url": "https://simonwillison.net/atom/everything/"},
-    # Кандидаты из спеки, §2, проверены probe_feeds.py 03.10.2026 — не добавлены,
+    # Портал, как TechCrunch. Добавлен 03.10.2026 решением автора (журнал сайта,
+    # «Ars Technica и Mistral — берём оба»): robots.txt боту отвечает 403,
+    # а прочитанный в браузере поимённо запрещает ИИ-ботов, в том числе Anthropic;
+    # для «*» фид не закрыт, наш User-Agent там не назван. Закроют фид боту —
+    # источник уйдёт в «Источники с ошибкой», как VentureBeat; не обходим
+    {"id": "arstechnica", "kind": "rss",    "url": "https://arstechnica.com/ai/feed/"},
+    # Остальные кандидаты из спеки, §2, проверены probe_feeds.py 03.10.2026 —
     # разбор в журнале сайта того же числа и в спеке, §2:
-    # - Ars Technica AI (arstechnica.com/ai/feed/) — фид живой, но robots.txt боту
-    #   отвечает 403, а прочитанный в браузере поимённо запрещает ИИ-ботов, в том
-    #   числе Anthropic; для «*» фид не закрыт. Брать ли — решение автора;
     # - Mistral AI (mistral.ai/rss.xml) — фид живой, robots.txt разрешает всё, но
     #   в записи только анонс в одно предложение: без докачки страницы
     #   (pipeline.PAGE_FETCH_SOURCES) пересказывать нечего. Решение автора;
@@ -173,6 +176,11 @@ def parse_iso(value: str | None) -> datetime | None:
     return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
 
 
+# Абзацы-ссылки в хвосте записи, а не текст статьи: у Ars Technica каждая
+# запись кончается «Read full article» и «Comments»
+FEED_LINK_LINES = {"Read full article", "Comments"}
+
+
 def html_to_text(html: str) -> str:
     """HTML из фида в плоский текст: абзацы через пустую строку."""
     if not html:
@@ -183,7 +191,8 @@ def html_to_text(html: str) -> str:
         parts = [b.get_text(" ", strip=True) for b in blocks if not b.find_parent(["li", "blockquote"])]
     else:
         parts = [soup.get_text(" ", strip=True)]
-    return "\n\n".join(re.sub(r"\s+", " ", p) for p in parts if p.strip())
+    parts = (re.sub(r"\s+", " ", p).strip() for p in parts)
+    return "\n\n".join(p for p in parts if p and p not in FEED_LINK_LINES)
 
 
 # ---------- RSS / Atom ----------
