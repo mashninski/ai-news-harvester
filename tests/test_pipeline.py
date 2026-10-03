@@ -707,6 +707,11 @@ def test_generate_prompt_asks_each_layer_to_add_something_new():
         assert "summary не паўтарае тэзіс" in task
         assert "retelling не пачынаецца з тэзіса" in task
         assert "Першы абзац — што здарылася і хто." not in task   # прежняя формулировка вела к повтору
+        # С 03.10.2026 summary на сайте не показывается: пересказ несёт все факты сам,
+        # разрешение опираться на summary снято (журнал сайта, «после этапа 8е»)
+        assert "retelling самадастатковы" in task
+        assert "Факт з summary ў пераказе можна" not in task
+        assert "для карткі ў стужцы" not in task
         assert '"' not in prompts.LAYERS                           # прямая кавычка обрывает поле ответа
 
 
