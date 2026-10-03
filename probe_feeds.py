@@ -8,11 +8,19 @@ User-Agent, что и коллектор: если источник режет �
     python probe_feeds.py URL [URL…]   # свои адреса
 
 Для каждого адреса печатает HTTP-код, тип фида, число записей и три последних
-заголовка с длиной текста. Годится, если: код 200, фид распознан, записи свежие
-(дни, не месяцы) и про ИИ, а не чужой раздел сайта.
+заголовка с длиной текста, плюс что robots.txt сайта говорит нашему User-Agent.
+Годится, если: код 200, фид распознан, записи свежие (дни, не месяцы) и про ИИ,
+а не чужой раздел сайта, robots.txt адрес не закрывает и в записях есть текст
+для пересказа (сотни знаков, а не анонс в одно предложение).
+
+robots.txt с кодом 4xx честно печатается как «не прочитан»: так было
+у Ars Technica 03.10.2026 (боту 403, в браузере — запрет ИИ-ботов поимённо).
+Это не «разрешено», а повод посмотреть файл руками и спросить автора.
 """
 
 import sys
+import urllib.robotparser
+from urllib.parse import urlsplit
 
 import feedparser
 import requests
@@ -40,6 +48,22 @@ def probe(url: str):
         body = content[0].get("value", "") if content else e.get("summary", "")
         print(f"    {e.get('published', e.get('updated', '?'))[:16]}  {e.get('title', '')[:70]}"
               f"  (текст: {len(collect.html_to_text(body))} зн.)")
+    print(f"    {robots(url)}")
+
+
+def robots(url: str) -> str:
+    """Что robots.txt сайта говорит про этот адрес нашему User-Agent."""
+    parts = urlsplit(url)
+    try:
+        r = requests.get(f"{parts.scheme}://{parts.netloc}/robots.txt",
+                         headers={"User-Agent": collect.USER_AGENT}, timeout=collect.TIMEOUT)
+    except Exception as ex:
+        return f"robots.txt: ОШИБКА {type(ex).__name__}"
+    if r.status_code != 200:
+        return f"robots.txt: HTTP {r.status_code} — не прочитан, посмотреть руками"
+    p = urllib.robotparser.RobotFileParser()
+    p.parse(r.text.splitlines())
+    return "robots.txt: адрес разрешён" if p.can_fetch(collect.USER_AGENT, url) else "robots.txt: адрес ЗАКРЫТ"
 
 
 def main():

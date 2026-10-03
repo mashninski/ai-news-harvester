@@ -59,10 +59,18 @@ SOURCES = [
     {"id": "venturebeat", "kind": "rss",    "url": "https://venturebeat.com/category/ai/feed/"},
     {"id": "mittr",      "kind": "rss",     "url": "https://www.technologyreview.com/topic/artificial-intelligence/feed"},
     {"id": "willison",   "kind": "rss",     "url": "https://simonwillison.net/atom/everything/"},
-    # Кандидаты из спеки, §2 («требуют ручной проверки»): Ars Technica AI, Meta AI,
-    # Mistral AI, Microsoft AI. 24.09.2026 проверить не удалось — из облачной сессии
-    # сайты источников закрыты сетевой политикой. Добавлять сюда только после
-    # проверки: python probe_feeds.py
+    # Кандидаты из спеки, §2, проверены probe_feeds.py 03.10.2026 — не добавлены,
+    # разбор в журнале сайта того же числа и в спеке, §2:
+    # - Ars Technica AI (arstechnica.com/ai/feed/) — фид живой, но robots.txt боту
+    #   отвечает 403, а прочитанный в браузере поимённо запрещает ИИ-ботов, в том
+    #   числе Anthropic; для «*» фид не закрыт. Брать ли — решение автора;
+    # - Mistral AI (mistral.ai/rss.xml) — фид живой, robots.txt разрешает всё, но
+    #   в записи только анонс в одно предложение: без докачки страницы
+    #   (pipeline.PAGE_FETCH_SOURCES) пересказывать нечего. Решение автора;
+    # - Microsoft AI — blogs.microsoft.com/ai/feed/ 410, microsoft.ai/feed/ — фид
+    #   без единой записи; Meta AI — оба адреса 404, на странице блога ссылки
+    #   на фид нет.
+    # Новый кандидат — сначала python probe_feeds.py
 ]
 
 # Блоги самих компаний. В кластере основным становится материал отсюда:
