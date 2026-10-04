@@ -185,7 +185,12 @@ jobs:
         if: ${{ !cancelled() && env.PIPELINE == 'on' && steps.guard.outcome == 'success' && env.PUBLISH == 'true' }}
         env:
           AI_NEWS_SITE_TOKEN: ${{ secrets.AI_NEWS_SITE_TOKEN }}
-        run: python publish.py --base "$SITE_BRANCH"
+        # PR вливается сразу (04.10.2026). Выключатель — переменная репозитория
+        # AI_NEWS_AUTOMERGE = off: тогда PR ждёт ручного мержа
+        run: |
+          args=()
+          if [[ "${{ vars.AI_NEWS_AUTOMERGE }}" != "off" ]]; then args+=(--merge); fi
+          python publish.py --base "$SITE_BRANCH" "${args[@]}"
 
       - name: Публикация — не в этом прогоне
         if: ${{ !cancelled() && env.PIPELINE == 'on' && steps.guard.outcome == 'success' && env.PUBLISH != 'true' }}

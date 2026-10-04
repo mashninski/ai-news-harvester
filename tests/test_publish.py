@@ -457,3 +457,27 @@ def test_check_same_as_site_dashboard(tmp_path):
         fatal, notes = publish.check(c)
         assert got == {"fatal": fatal, "notes": [n["detail"] for n in notes],
                        "paragraphs": publish.paragraphs(c["retelling"])}, c
+
+
+def test_merge_squashes_with_head_sha_and_failure_keeps_state(tmp_path):
+    r = routes(); r[("PUT", "/pulls/7/merge")] = (200, {"merged": True})
+    s = FakeSession(r)
+    db = collect.open_state(tmp_path / "state.sqlite")
+    number, _, ok = publish.publish(plan_with_note(), publish.GitHub("o/r", "t", s), db, "main", merge=True)
+    assert (number, ok) == (7, True)
+    put = [(p, b) for m, p, b in s.calls if m == "PUT"]
+    assert put[0][0] == "/pulls/7/merge"
+    assert put[0][1]["merge_method"] == "squash" and put[0][1]["sha"] == "c2"
+    # без merge — PUT не уходит
+    s2 = FakeSession(routes())
+    publish.publish(plan_with_note(), publish.GitHub("o/r", "t", s2), collect.open_state(tmp_path / "s2.sqlite"), "main")
+    assert not [c for c in s2.calls if c[0] == "PUT"]
+    # мерж упал (409) — исключение, но карточки уже в состоянии
+    r3 = routes(); r3[("PUT", "/pulls/7/merge")] = (409, {"message": "Head branch was modified"})
+    db3 = collect.open_state(tmp_path / "s3.sqlite")
+    try:
+        publish.publish(plan_with_note(), publish.GitHub("o/r", "t", FakeSession(r3)), db3, "main", merge=True)
+        assert False
+    except publish.GitHubError:
+        pass
+    assert f"{1:040x}" in publish.done_ids(db3)

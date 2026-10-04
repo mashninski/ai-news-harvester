@@ -11,6 +11,7 @@ content/naviny/<hash>.json на карточку. Ревью — диф этог
 
     python publish.py                       # PR в main со всем, что ещё не предлагалось
     python publish.py --base naviny-test    # PR в другую ветку — проверка, не прод
+    python publish.py --merge               # открыть PR и сразу влить его (автопубликация, прогон Actions)
     python publish.py --preview DIR         # без сети и токена: что ушло бы в PR — файлами в DIR
     python publish.py --cards DIR           # взять карточки не из output/cards
 
@@ -524,6 +525,14 @@ class GitHub:
     def append_body(self, number: int, body: str):
         self.call("PATCH", f"/pulls/{number}", {"body": body})
 
+    def merge(self, number: int, commit: str, title: str):
+        """Вливает PR сразу: без ручного нажатия «Merge» (решение автора
+        04.10.2026: карточки идут на сайт сами, качество — внутри процесса).
+        sha — страховка: если ветку успели сдвинуть, GitHub ответит 409 и ничего
+        не вольёт. Squash — одна запись в истории на сутки."""
+        self.call("PUT", f"/pulls/{number}/merge",
+                  {"merge_method": "squash", "sha": commit, "commit_title": title})
+
 
 # ---------- состояние ----------
 
@@ -557,21 +566,27 @@ def load_env_file(path: Path = ENV_FILE):
         os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
 
 
-def publish(plan: Plan, gh: GitHub, db: sqlite3.Connection, base: str) -> tuple[int, str, bool]:
-    """Открывает PR и ставит заметки. Возвращает (номер, ссылка, заметки встали)."""
+def publish(plan: Plan, gh: GitHub, db: sqlite3.Connection, base: str,
+            merge: bool = False) -> tuple[int, str, bool]:
+    """Открывает PR, ставит заметки, с merge=True вливает. Возвращает (номер,
+    ссылка, заметки встали). Упавший мерж — GitHubError: PR остаётся открытым,
+    карточки уже в состоянии и второй раз не уйдут — влить вручную."""
     number, url, commit = gh.open_pr(plan, base)
     # Сразу в состояние: даже если дальше что-то упадёт, эти карточки второй раз не уйдут
     record(db, plan, number)
     comments = [c for e in plan.entries for c in e.comments]
-    if not comments:
-        return number, url, True
-    try:
-        gh.comment_lines(number, commit, comments)
-        return number, url, True
-    except GitHubError as e:
-        log.warning("комментарии к строкам не встали (%s) — заметки дописаны в описание PR", e)
-        gh.append_body(number, (plan.body + notes_markdown(plan))[:BODY_LIMIT])
-        return number, url, False
+    ok = True
+    if comments:
+        try:
+            gh.comment_lines(number, commit, comments)
+        except GitHubError as e:
+            log.warning("комментарии к строкам не встали (%s) — заметки дописаны в описание PR", e)
+            gh.append_body(number, (plan.body + notes_markdown(plan))[:BODY_LIMIT])
+            ok = False
+    if merge:
+        gh.merge(number, commit, plan.title)
+        ok = True          # заметки остались в закрытом PR для истории; красный прогон из-за них ни к чему
+    return number, url, ok
 
 
 def main():
@@ -579,6 +594,7 @@ def main():
     ap.add_argument("--cards", default=str(CARDS_DIR), help="папка с карточками пайплайна")
     ap.add_argument("--base", default="main", help="ветка сайта, в которую PR")
     ap.add_argument("--state", default=str(collect.STATE_PATH), help="путь к файлу состояния")
+    ap.add_argument("--merge", action="store_true", help="влить PR сразу после открытия")
     ap.add_argument("--preview", metavar="DIR", help="без сети: записать в DIR файлы, тело PR и комментарии")
     args = ap.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(message)s")
@@ -608,8 +624,11 @@ def main():
     if not plan.entries:
         log.info("Новых карточек нет — PR не открываю")
         return
-    number, url, ok = publish(plan, gh, db, args.base)
-    log.info("PR #%d: %s — %s", number, url, cards_word(len(plan.entries)))
+    try:
+        number, url, ok = publish(plan, gh, db, args.base, merge=args.merge)
+    except GitHubError as e:
+        sys.exit(f"PR открыт, но не влит: {e}. Карточки в состоянии — второй раз не уйдут, влить PR вручную")
+    log.info("PR #%d: %s — %s%s", number, url, cards_word(len(plan.entries)), ", влит" if args.merge else "")
     if not ok:
         sys.exit(1)
 
