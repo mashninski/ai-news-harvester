@@ -275,6 +275,8 @@ def fail_step(db, h: str, back_to: str, error: str):
     if stage == "failed":
         forget_body(db, h)      # дальше материал никуда не пойдёт
     log.warning("%s: %s → %s (попытка %d): %s", h[:8], back_to, stage, attempts, error[:200])
+    if stage == "failed":       # повторная попытка — рабочий шум, а снятый материал — уже потеря
+        collect.actions_warning(f"{h[:8]}: снят после {attempts} попыток ({back_to}): {error[:200]}")
 
 
 def forget_body(db, h: str):

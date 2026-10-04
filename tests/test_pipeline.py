@@ -832,3 +832,18 @@ def test_workflow_generates_and_fixes_once_a_day():
     assert (23 + 2) % 24 == 1 and 1 + 4 == 5
     assert "generate:" in wf and 'args+=(--generate)' in wf and 'args+=(--fix)' in wf
     assert '"$GENERATE" == "true"' in wf and '"$FIX" == "true"' in wf
+
+
+def test_only_final_failure_is_an_actions_annotation(tmp_path, site, monkeypatch, capsys):
+    # Повторная попытка — шум, аннотация только на снятый материал
+    monkeypatch.setattr(pipeline, "CARDS_DIR", tmp_path / "cards")
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
+    db = collect.open_state(tmp_path / "state.sqlite")
+    (h,) = seed(db, 1)
+    res = pipeline.Resources(site, "narkamauka")
+    client = fake_client(lambda stage, params: None)
+    for _ in range(2 * pipeline.MAX_ATTEMPTS + 1):
+        pipeline.run_once(db, client, res, limit=10)
+    warnings = [l for l in capsys.readouterr().out.splitlines() if "снят после" in l]
+    assert warnings == [l for l in warnings if l.startswith(f"::warning::{h[:8]}: снят после {pipeline.MAX_ATTEMPTS} попыток")]
+    assert len(warnings) == 1

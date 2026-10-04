@@ -481,3 +481,16 @@ def test_merge_squashes_with_head_sha_and_failure_keeps_state(tmp_path):
     except publish.GitHubError:
         pass
     assert f"{1:040x}" in publish.done_ids(db3)
+
+
+def test_skipped_and_failed_comments_become_annotations_in_actions(tmp_path, monkeypatch, capsys):
+    monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
+    publish.report_skipped(plan_with_note())
+    assert "::warning::" not in capsys.readouterr().out          # вне Actions — только лог
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
+    publish.report_skipped(plan_with_note())
+    assert capsys.readouterr().out.splitlines() == [f"::warning::НЕ ВОШЛА {'bad' * 4} : x"]   # заголовка у битой нет
+    s = FakeSession(routes(review=(422, {"message": "line must be part of the diff"})))
+    publish.publish(plan_with_note(), publish.GitHub("o/r", "t", s), collect.open_state(tmp_path / "s.sqlite"), "main")
+    out = capsys.readouterr().out
+    assert out.startswith("::warning::комментарии к строкам не встали") and "описание PR" in out

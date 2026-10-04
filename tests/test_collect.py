@@ -349,3 +349,16 @@ def test_dry_run_writes_nothing(db, monkeypatch):
     monkeypatch.setattr(collect, "fetch", FakeNet())
     collect.collect(db, sources=[OPENAI], now=NOW, dry_run=True)
     assert db.execute("SELECT COUNT(*) FROM seen").fetchone() == (0,)
+
+
+def test_actions_warning_only_in_actions_and_escaped(db, monkeypatch, capsys):
+    monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
+    collect.actions_warning("x")
+    assert capsys.readouterr().out == ""
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
+    collect.actions_warning("100% готово\nдругая строка")
+    assert capsys.readouterr().out == "::warning::100%25 готово%0Aдругая строка\n"
+    # упавший источник — аннотацией, рабочий — нет
+    run(db, monkeypatch, [BROKEN, TECHCRUNCH])
+    warnings = [l for l in capsys.readouterr().out.splitlines() if l.startswith("::warning::")]
+    assert len(warnings) == 1 and warnings[0].startswith("::warning::ПРОПУЩЕН источник broken — ")

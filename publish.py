@@ -581,12 +581,21 @@ def publish(plan: Plan, gh: GitHub, db: sqlite3.Connection, base: str,
             gh.comment_lines(number, commit, comments)
         except GitHubError as e:
             log.warning("комментарии к строкам не встали (%s) — заметки дописаны в описание PR", e)
+            collect.actions_warning(f"комментарии к строкам не встали ({e}) — заметки дописаны в описание PR")
             gh.append_body(number, (plan.body + notes_markdown(plan))[:BODY_LIMIT])
             ok = False
     if merge:
         gh.merge(number, commit, plan.title)
         ok = True          # заметки остались в закрытом PR для истории; красный прогон из-за них ни к чему
     return number, url, ok
+
+
+def report_skipped(plan: Plan):
+    """Отсеянные check() карточки — в лог и, в Actions, аннотациями: при автомерже
+    это единственный след карточки, которая не дошла до сайта."""
+    for cid, title, reasons in plan.skipped:
+        log.warning("НЕ ВОШЛА %s %s: %s", cid[:12], title[:60], "; ".join(reasons))
+        collect.actions_warning(f"НЕ ВОШЛА {cid[:12]} {title[:60]}: {'; '.join(reasons)}")
 
 
 def main():
@@ -619,8 +628,7 @@ def main():
 
     done = done_ids(db) | gh.published_ids(args.base)
     plan = plan_pr(cards, broken, done, args.base, when)
-    for cid, title, reasons in plan.skipped:
-        log.warning("НЕ ВОШЛА %s %s: %s", cid[:12], title[:60], "; ".join(reasons))
+    report_skipped(plan)
     if not plan.entries:
         log.info("Новых карточек нет — PR не открываю")
         return

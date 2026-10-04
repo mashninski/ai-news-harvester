@@ -26,6 +26,7 @@ import calendar
 import hashlib
 import json
 import logging
+import os
 import re
 import sqlite3
 import sys
@@ -98,6 +99,16 @@ CLUSTER_MIN_SHARED = 2        # общих значимых слов не мен
 CLUSTER_MIN_OVERLAP = 0.5     # доля общих слов от более короткого заголовка
 
 log = logging.getLogger("harvester")
+
+
+def actions_warning(text: str):
+    """В Actions — ещё и аннотация ::warning:: к строке лога. Аннотации видны
+    на странице прогона и в панели «Стан навін» админки сайта (она читает
+    их через API, логи без токена не читаются); прогон от них не краснеет.
+    Вне Actions — ничего. % и переводы строк — по правилам команд Actions."""
+    if os.environ.get("GITHUB_ACTIONS") == "true":
+        esc = text.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+        print(f"::warning::{esc}", flush=True)
 
 
 @dataclass
@@ -526,6 +537,7 @@ def collect(db: sqlite3.Connection, sources=SOURCES, now: datetime | None = None
             # только этот источник
             failed[src["id"]] = f"{type(ex).__name__}: {ex}"[:300]
             log.warning("ПРОПУЩЕН источник %s — %s", src["id"], failed[src["id"]])
+            actions_warning(f"ПРОПУЩЕН источник {src['id']} — {failed[src['id']]}")
             continue
         log.info("%s: %d записей", src["id"], len(got))
         raw += got
