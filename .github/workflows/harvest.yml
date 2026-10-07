@@ -10,54 +10,50 @@
 # репозитория AI_NEWS_PIPELINE не равна «on» (Settings → Secrets and
 # variables → Actions → Variables). Коллектор бесплатный и работает всегда.
 #
-# Один PR в сутки (журнал сайта, 02.10.2026, «Этап 8а»): публикация — только
-# в прогоне 05:17 UTC (08:17 по Мінску) или при ручном запуске с галкой
-# publish. Черновики между прогонами ждут в кэше (output/cards) и все уходят
-# в этот один PR.
+# Два цикла в сутки (журнал сайта, 07.10.2026, «Этап 9»): новость должна
+# попасть на сайт не позже чем через сутки после выхода у источника. Цикл —
+# генерация, fix и публикация по одному батчу; справочный блок кэшируется
+# на час, поэтому батч в каждом прогоне платил бы запись кэша заново. UTC:
+#   23:17 / 11:17  генерация отправлена
+#   01:17 / 13:17  генерация забрана, чистые карточки готовы; fix отправлен
+#   03:17 / 15:17  fix забран
+#   05:17 / 17:17  публикация: PR с карточками, вливается сам
+# Остальные нечётные часы — сбор и triage. Батч не успел к своему прогону —
+# забирается следующим, а его карточки уходят в PR следующего цикла.
 #
-# Генерация и fix — по одному батчу в сутки (журнал сайта, 03.10.2026,
-# «Этап 8г»): справочный блок кэшируется на час, и батч в каждом прогоне
-# платил бы запись кэша заново. Цепочка к утреннему PR, UTC:
-#   23:17  генерация отправлена
-#   01:17  генерация забрана, чистые карточки готовы; fix отправлен
-#   03:17  fix забран
-#   05:17  публикация
-# Батч не успел к своему прогону — забирается следующим, а его карточки
-# с правками fix уходят в PR на день позже. Triage — в каждом прогоне.
+# Кто запускает. Основной путь — Worker strymy-bot в Cloudflare (репозиторий
+# streaminfo-sitebot, папка worker/): в :17 нечётных часов он шлёт
+# workflow_dispatch с явным видом прогона (вход kind). Расписание GitHub
+# выкидывает прогоны (03–04.10.2026 — по 3 в сутки), workflow_dispatch
+# ставится в очередь сразу. schedule ниже — запасной путь, на 30 минут позже:
+# если Worker этот прогон уже запустил, запасной ничего не делает
+# (задача plan). Часы и виды прогонов в Worker'е и здесь — одни и те же.
 
 name: harvest
+# Вид прогона в списке Actions: по нему запасной прогон находит прогон Worker'а
+run-name: "${{ inputs.kind && format('harvest: {0}', inputs.kind) || 'harvest' }}"
 
 on:
   schedule:
-    # Минута 17, а не 0: на ровный час в Actions очередь, прогон опаздывает.
-    # Раз в 2 часа по нечётным часам UTC; 23:17, 01:17 и 05:17 — отдельными
-    # строками: по ним (github.event.schedule) генерация, fix и публикация
-    # узнают свой прогон — опоздание прогона в очереди на это не влияет.
-    # Меняешь эти строки — меняй и env GENERATE, FIX, PUBLISH ниже
-    - cron: "17 3,7,9,11,13,15,17,19,21 * * *"
-    - cron: "17 23 * * *"
-    - cron: "17 1 * * *"
-    - cron: "17 5 * * *"
+    # Запасной путь: минута 47, Worker запускает те же прогоны в 17.
+    # Вид прогона узнаётся по строке (github.event.schedule), а не по часам:
+    # прогон в очереди опаздывает. Меняешь эти строки — меняй и case
+    # в шаге «Вид прогона» ниже, и часы в Worker'е (worker/src/harvest.js)
+    - cron: "47 3,7,9,15,19,21 * * *"
+    - cron: "47 11,23 * * *"
+    - cron: "47 1,13 * * *"
+    - cron: "47 5,17 * * *"
   workflow_dispatch:
     inputs:
+      kind:
+        description: "Вид прогона: collect — сбор и triage; generate — плюс батч генерации; fix — плюс батч fix; publish — плюс PR с карточками"
+        type: choice
+        options: [collect, generate, fix, publish]
+        default: collect
       cold_start:
         description: "Кэша состояния нет — всё равно запускать пайплайн с пустым состоянием"
         type: boolean
         default: false
-      publish:
-        description: "Открыть PR с карточками сейчас, не дожидаясь прогона 05:17 UTC"
-        type: boolean
-        default: false
-      generate:
-        description: "Отправить батч генерации сейчас, не дожидаясь прогона 23:17 UTC"
-        type: boolean
-        default: false
-
-# Два прогона одновременно прочитали бы одно состояние, и сохранился бы
-# только последний: отправленный первым батч потерялся бы вместе с оплатой
-concurrency:
-  group: harvest
-  cancel-in-progress: false
 
 permissions:
   contents: read
@@ -71,18 +67,73 @@ env:
   # tarask — через конвертер taraskevizer. Тарашкевіца выключена решением
   # автора 02.10.2026 (журнал сайта); вернуть — переменная AI_NEWS_ORTHOGRAPHY = tarask
   AI_NEWS_ORTHOGRAPHY: ${{ vars.AI_NEWS_ORTHOGRAPHY || 'narkamauka' }}
-  # Прогон публикации: расписание 05:17 UTC или ручной запуск с галкой publish
-  PUBLISH: ${{ github.event.schedule == '17 5 * * *' || inputs.publish == true }}
-  # Прогон генерации: расписание 23:17 UTC или ручной запуск с галкой generate
-  GENERATE: ${{ github.event.schedule == '17 23 * * *' || inputs.generate == true }}
-  # Прогон fix: расписание 01:17 UTC — он же забирает батч генерации.
-  # Вручную fix не запускается: его подберёт ближайший прогон 01:17
-  FIX: ${{ github.event.schedule == '17 1 * * *' }}
 
 jobs:
+  # Какой это прогон и не запущен ли он уже Worker'ом. Отдельной задачей
+  # и без concurrency: запасной прогон не встаёт в очередь за идущим
+  plan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: read
+    outputs:
+      kind: ${{ steps.kind.outputs.kind }}
+      skip: ${{ steps.dup.outputs.skip }}
+    steps:
+      - name: Вид прогона
+        id: kind
+        env:
+          SCHEDULE: ${{ github.event.schedule }}
+          INPUT_KIND: ${{ inputs.kind }}
+        run: |
+          case "$SCHEDULE" in
+            "47 11,23 * * *") kind=generate ;;
+            "47 1,13 * * *")  kind=fix ;;
+            "47 5,17 * * *")  kind=publish ;;
+            "")               kind="${INPUT_KIND:-collect}" ;;
+            *)                kind=collect ;;
+          esac
+          echo "kind=$kind" >> "$GITHUB_OUTPUT"
+          echo "Вид прогона: $kind (${GITHUB_EVENT_NAME})" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      # Запасной прогон идёт через 30 минут после Worker'а (плюс опоздание
+      # очереди). Прогон Worker'а того же вида за последние 100 минут — успешный
+      # или ещё идущий — значит, этот не нужен. Упал — запасной повторяет его:
+      # повтор безопасен (генерация берёт только отобранное, fix не чаще
+      # FIX_MIN_INTERVAL, публикация не предлагает карточку второй раз).
+      # API не ответил — прогон идёт: лишний прогон дешевле пропущенного
+      - name: Worker уже запустил этот прогон?
+        id: dup
+        if: ${{ github.event_name == 'schedule' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          KIND: ${{ steps.kind.outputs.kind }}
+        run: |
+          since=$(date -u -d '-100 minutes' +%Y-%m-%dT%H:%M:%SZ)
+          found=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/harvest.yml/runs?event=workflow_dispatch&per_page=30&created=%3E%3D$since" \
+            --jq "[.workflow_runs[] | select(.display_title == \"harvest: $KIND\" and (.conclusion == \"success\" or .status != \"completed\"))] | .[0].html_url // \"\"") || found=""
+          if [[ -n "$found" ]]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "Этот прогон уже запустил Worker: $found — запасной не нужен" | tee -a "$GITHUB_STEP_SUMMARY"
+          else
+            echo "Прогона Worker'а «$KIND» за 100 минут нет — запасной идёт сам" | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
+
   harvest:
+    needs: plan
+    if: ${{ needs.plan.outputs.skip != 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    # Два прогона одновременно прочитали бы одно состояние, и сохранился бы
+    # только последний: отправленный первым батч потерялся бы вместе с оплатой
+    concurrency:
+      group: harvest
+      cancel-in-progress: false
+    env:
+      KIND: ${{ needs.plan.outputs.kind }}
+      GENERATE: ${{ needs.plan.outputs.kind == 'generate' }}
+      FIX: ${{ needs.plan.outputs.kind == 'fix' }}
+      PUBLISH: ${{ needs.plan.outputs.kind == 'publish' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -173,7 +224,7 @@ jobs:
         env:
           AI_NEWS_ANTHROPIC_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           AI_NEWS_SITE_REPO: ${{ github.workspace }}/site
-          # Месячный бюджет в $, не задан — 16. Исчерпан — прогон зелёный, с предупреждением
+          # Месячный бюджет в $, не задан — 28. Исчерпан — прогон зелёный, с предупреждением
           AI_NEWS_MONTHLY_BUDGET_USD: ${{ vars.AI_NEWS_MONTHLY_BUDGET_USD }}
         run: |
           args=()
@@ -196,7 +247,7 @@ jobs:
         if: ${{ !cancelled() && env.PIPELINE == 'on' && steps.guard.outcome == 'success' && env.PUBLISH != 'true' }}
         run: |
           n=$(ls output/cards/*.json 2>/dev/null | wc -l)
-          msg="PR — раз в сутки, в прогоне 05:17 UTC (или Run workflow с галкой publish). Черновиков в кэше: $n (в том числе уже предложенные)"
+          msg="PR — два раза в сутки, в прогонах 05:17 и 17:17 UTC (или Run workflow с видом publish). Черновиков в кэше: $n (в том числе уже предложенные)"
           echo "$msg"
           echo "$msg" >> "$GITHUB_STEP_SUMMARY"
 

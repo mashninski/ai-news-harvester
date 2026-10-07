@@ -3,8 +3,10 @@
 «запуске», забор в следующем."""
 
 import json
+import os
 import re
 import shutil
+import subprocess
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace as NS
@@ -641,14 +643,14 @@ def test_monthly_budget_stops_new_batches_but_collects_ready(tmp_path, site, mon
     monkeypatch.setattr(pipeline, "CARDS_DIR", tmp_path / "cards")
     db = collect.open_state(tmp_path / "state.sqlite")
     past_batch(db, "sept", "generate", 10, "2026-09-25T12:00:00Z", 100.0)   # прошлы месяц не лічыцца
-    past_batch(db, "oct", "generate", 10, "2026-10-01T12:00:00Z", 5.0)      # 5 < 16, множителя нет
+    past_batch(db, "oct", "generate", 10, "2026-10-01T12:00:00Z", 5.0)      # 5 < 28, множителя нет
     triaged(db, 3)
     client = fake_client(answers)
     res = pipeline.Resources(site, "narkamauka")
     pipeline.run_once(db, client, res, now=NOW)
     assert generate_requests(client) == [3]                    # бюджет ещё есть
-    # Прошлые батчи месяца вместе — $16,20: 16,2 ≥ 16
-    db.execute("UPDATE batch SET usage = ? WHERE id = 'oct'", (json.dumps({"tokens": {}, "usd": 16.2}),))
+    # Прошлые батчи месяца вместе — $28,20: 28,2 ≥ 28
+    db.execute("UPDATE batch SET usage = ? WHERE id = 'oct'", (json.dumps({"tokens": {}, "usd": 28.2}),))
     seed_more = triaged(db, 2)
     pipeline.run_once(db, client, res, now=NOW)
     assert generate_requests(client) == [3]                    # новых батчей нет
@@ -661,8 +663,8 @@ def test_monthly_budget_stops_new_batches_but_collects_ready(tmp_path, site, mon
     assert "Бюджет месяца исчерпан" in summary.read_text(encoding="utf-8")
     b = pipeline.budget_state(db, NOW)
     assert b["exhausted"] and b["left"] == 0
-    # Бюджет из переменной: $20 — генерация снова идёт
-    monkeypatch.setenv(pipeline.BUDGET_ENV, "20")
+    # Бюджет из переменной: $30 — генерация снова идёт
+    monkeypatch.setenv(pipeline.BUDGET_ENV, "30")
     assert not pipeline.budget_state(db, NOW)["exhausted"]
     monkeypatch.setenv(pipeline.BUDGET_ENV, "восем")
     with pytest.raises(SystemExit):
@@ -676,8 +678,8 @@ def test_status_prints_month_budget_and_day(tmp_path, monkeypatch, capsys):
     past_batch(db, "b", "triage", 30, "2026-09-30T10:00:00Z", 1.0)        # верасень
     pipeline.status(db, NOW)
     out = capsys.readouterr().out
-    assert "потрачено ≈ $0.2000 (оценка ×1.0) из $16.00" in out
-    assert "осталось ≈ $15.8000" in out and "за сутки по Мінску: 4 из 40" in out
+    assert "потрачено ≈ $0.2000 (оценка ×1.0) из $28.00" in out
+    assert "осталось ≈ $27.8000" in out and "за сутки по Мінску: 4 из 40" in out
 
 
 def test_generation_takes_important_then_freshest_and_expires_stale(tmp_path, site, monkeypatch):
@@ -715,10 +717,11 @@ def test_generate_prompt_asks_each_layer_to_add_something_new():
         assert '"' not in prompts.LAYERS                           # прямая кавычка обрывает поле ответа
 
 
-# ---------- генерация и fix раз в сутки ----------
-# Журнал сайта, 03.10.2026, «Этап 8г»: справочный блок кэшируется на час,
-# прогоны — раз в 2 часа, поэтому генерация и fix — по батчу в сутки, в своих
-# прогонах цепочки 23:17 → 01:17 → 03:17 → 05:17 UTC
+# ---------- генерация и fix: по батчу за цикл, два цикла в сутки ----------
+# Журнал сайта, 07.10.2026, «Этап 9» (до того — раз в сутки, «Этап 8г»):
+# справочный блок кэшируется на час, прогоны — раз в 2 часа, поэтому генерация
+# и fix — по батчу за цикл, в своих прогонах цепочки, UTC:
+# 23:17 → 01:17 → 03:17 → 05:17 и 11:17 → 13:17 → 15:17 → 17:17
 
 WORKFLOW = Path(__file__).resolve().parent.parent / ".github" / "workflows" / "harvest.yml"
 
@@ -729,9 +732,9 @@ def test_generation_only_when_allowed(tmp_path, site, monkeypatch):
     triaged(db, 3)
     client = fake_client(answers)
     res = pipeline.Resources(site, "narkamauka")
-    pipeline.run_once(db, client, res, generate=False, fix=False)    # обычный прогон
+    pipeline.run_once(db, client, res, generate=False, fix=False)    # прогон сбора
     assert generate_requests(client) == []
-    pipeline.run_once(db, client, res, generate=True, fix=False)     # прогон генерации или галка generate
+    pipeline.run_once(db, client, res, generate=True, fix=False)     # прогон генерации, kind=generate
     assert generate_requests(client) == [3]
 
 
@@ -749,7 +752,7 @@ def fix_requests(client):
             if b.store[i]["requests"][0]["custom_id"].startswith("f-")]
 
 
-def test_fix_at_most_once_a_day(tmp_path, site, monkeypatch):
+def test_fix_at_most_once_a_cycle(tmp_path, site, monkeypatch):
     monkeypatch.delenv(pipeline.BUDGET_ENV, raising=False)
     monkeypatch.setattr(pipeline, "CARDS_DIR", tmp_path / "cards")
     db = collect.open_state(tmp_path / "state.sqlite")
@@ -760,15 +763,18 @@ def test_fix_at_most_once_a_day(tmp_path, site, monkeypatch):
     pipeline.run_once(db, client, res, now=now, generate=True, fix=False)
     pipeline.run_once(db, client, res, now=now, generate=False, fix=True)   # забрал генерацию, отправил fix
     assert fix_requests(client) == [1]
-    # Ещё одна генерация в те же сутки (ручная галка) — её fix ждёт
+    # Повтор того же прогона fix (запасной после упавшего, перезапуск руками) —
+    # второй fix не уходит, карточка ждёт
     triaged(db, 1)
     pipeline.run_once(db, client, res, now=now, generate=True, fix=False)
     pipeline.run_once(db, client, res, now=now + timedelta(hours=2), generate=False, fix=True)
     assert fix_requests(client) == [1]
     assert db.execute("SELECT COUNT(*) FROM item WHERE stage = 'linted'").fetchone()[0] == 1
-    # Через сутки — следующий fix
-    pipeline.run_once(db, client, res, now=now + timedelta(hours=24), generate=False, fix=True)
+    # Следующий цикл, через 12 часов, — следующий fix
+    pipeline.run_once(db, client, res, now=now + timedelta(hours=12), generate=False, fix=True)
     assert fix_requests(client) == [1, 1]
+    # Опоздавший прогон fix одного цикла и вовремя — следующего: между ними меньше 12 ч
+    assert pipeline.FIX_MIN_INTERVAL <= timedelta(hours=8)
 
 
 def test_daily_chain_cards_reach_publication(tmp_path, site, monkeypatch):
@@ -779,7 +785,7 @@ def test_daily_chain_cards_reach_publication(tmp_path, site, monkeypatch):
     h0, h1, h2 = seed(db)
     res = pipeline.Resources(site, "narkamauka")
     client = fake_client(answers)
-    # Прогоны суток с флагами, как их ставит воркфлоу (сверяет тест ниже)
+    # Прогоны цикла с флагами, как их ставит воркфлоу (сверяет тест ниже)
     chain = [("21:17", False, False),    # triage
              ("23:17", True, False),     # triage забран, генерация отправлена
              ("01:17", False, True),     # генерация забрана, чистая карточка готова, fix отправлен
@@ -811,27 +817,76 @@ def test_status_shows_waiting_by_publication_day(tmp_path, monkeypatch, capsys):
     assert pipeline.waiting_line(collect.open_state(tmp_path / "empty.sqlite")) == "Отобрано и ждёт генерации: 0"
 
 
-def cron_hours(wf: str) -> list[list[int]]:
-    lines = re.findall(r'- cron: "17 ([\d,]+) \* \* \*"', wf)
-    return [[int(h) for h in line.split(",")] for line in lines]
+def cron_lines(wf: str) -> dict[str, list[int]]:
+    """Строки запасного расписания: {строка cron: часы}."""
+    return {f"47 {hours} * * *": [int(h) for h in hours.split(",")]
+            for hours in re.findall(r'- cron: "47 ([\d,]+) \* \* \*"', wf)}
 
 
-def test_workflow_generates_and_fixes_once_a_day():
+def run_kind_step(schedule: str, input_kind: str, tmp_path) -> str:
+    """Выполняет шаг «Вид прогона» воркфлоу как есть и возвращает kind."""
+    yaml = pytest.importorskip("yaml")
+    bash = shutil.which("bash")
+    if not bash:
+        pytest.skip("нет bash")
+    wf = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+    step = next(s for s in wf["jobs"]["plan"]["steps"] if s.get("id") == "kind")
+    out = tmp_path / "out"
+    out.write_text("", encoding="utf-8")
+    env = {**os.environ, "SCHEDULE": schedule, "INPUT_KIND": input_kind, "GITHUB_EVENT_NAME": "test",
+           "GITHUB_OUTPUT": str(out), "GITHUB_STEP_SUMMARY": str(tmp_path / "summary")}
+    subprocess.run([bash, "-e", "-c", step["run"]], env=env, check=True, capture_output=True)
+    return dict(line.split("=", 1) for line in out.read_text(encoding="utf-8").split())["kind"]
+
+
+def test_workflow_two_cycles_a_day(tmp_path):
+    yaml = pytest.importorskip("yaml")
     wf = WORKFLOW.read_text(encoding="utf-8")
-    hours = cron_hours(wf)
-    flat = sorted(h for line in hours for h in line)
+    lines = cron_lines(wf)
     # Раз в 2 часа по нечётным часам, каждый час — ровно в одной строке
-    assert flat == list(range(1, 24, 2))
-    # Генерация, fix и публикация — каждая своей строкой из одного часа:
-    # по строке (github.event.schedule) прогон себя и узнаёт
-    assert [23] in hours and [1] in hours and [5] in hours
-    assert "GENERATE: ${{ github.event.schedule == '17 23 * * *' || inputs.generate == true }}" in wf
-    assert "FIX: ${{ github.event.schedule == '17 1 * * *' }}" in wf
-    assert "PUBLISH: ${{ github.event.schedule == '17 5 * * *' || inputs.publish == true }}" in wf
-    # Цепочка: генерация → (+2 ч) забор и fix → (+2 ч) забор fix → (+2 ч) публикация
-    assert (23 + 2) % 24 == 1 and 1 + 4 == 5
-    assert "generate:" in wf and 'args+=(--generate)' in wf and 'args+=(--fix)' in wf
+    assert sorted(h for hours in lines.values() for h in hours) == list(range(1, 24, 2))
+    kinds = {line: run_kind_step(line, "", tmp_path) for line in lines}
+    by_kind = {k: sorted(h for line, hours in lines.items() if kinds[line] == k for h in hours)
+               for k in ("generate", "fix", "publish", "collect")}
+    assert by_kind["generate"] == [11, 23] and by_kind["fix"] == [1, 13] and by_kind["publish"] == [5, 17]
+    # Цепочка цикла: генерация → (+2 ч) забор и fix → (+2 ч) забор fix → (+2 ч) публикация
+    for g in by_kind["generate"]:
+        assert (g + 2) % 24 in by_kind["fix"] and (g + 6) % 24 in by_kind["publish"]
+        assert (g + 4) % 24 in by_kind["collect"]
+    # Циклы сдвинуты на 12 часов: новость ждёт генерации не дольше полусуток
+    assert by_kind["generate"][1] - by_kind["generate"][0] == 12
+    # Ручной запуск и Worker: вид — из входа kind, без входа — сбор
+    options = yaml.safe_load(wf)[True]["workflow_dispatch"]["inputs"]["kind"]["options"]
+    assert options == ["collect", "generate", "fix", "publish"]
+    for kind in options:
+        assert run_kind_step("", kind, tmp_path) == kind
+    assert run_kind_step("", "", tmp_path) == "collect"
+    # Флаги пайплайна и публикация — по виду прогона из задачи plan
+    assert "GENERATE: ${{ needs.plan.outputs.kind == 'generate' }}" in wf
+    assert "FIX: ${{ needs.plan.outputs.kind == 'fix' }}" in wf
+    assert "PUBLISH: ${{ needs.plan.outputs.kind == 'publish' }}" in wf
+    assert 'args+=(--generate)' in wf and 'args+=(--fix)' in wf
     assert '"$GENERATE" == "true"' in wf and '"$FIX" == "true"' in wf
+
+
+def test_workflow_backup_schedule_skips_what_worker_ran():
+    yaml = pytest.importorskip("yaml")
+    text = WORKFLOW.read_text(encoding="utf-8")
+    wf = yaml.safe_load(text)
+    # По имени прогона запасной находит прогон Worker'а того же вида
+    assert wf["run-name"] == "${{ inputs.kind && format('harvest: {0}', inputs.kind) || 'harvest' }}"
+    dup = next(s for s in wf["jobs"]["plan"]["steps"] if s.get("id") == "dup")
+    assert dup["if"] == "${{ github.event_name == 'schedule' }}"
+    assert "event=workflow_dispatch" in dup["run"] and '\\"harvest: $KIND\\"' in dup["run"]
+    assert "skip=true" in dup["run"]
+    assert wf["jobs"]["plan"]["permissions"] == {"actions": "read"}
+    # Основная задача пропускается целиком и не стоит в очереди concurrency
+    harvest = wf["jobs"]["harvest"]
+    assert harvest["needs"] == "plan" and harvest["if"] == "${{ needs.plan.outputs.skip != 'true' }}"
+    assert harvest["concurrency"]["group"] == "harvest" and "concurrency" not in wf
+    assert "concurrency" not in wf["jobs"]["plan"]
+    # Запасной — в минуту 47, Worker — в 17: строк с 17 в расписании нет
+    assert '- cron: "17 ' not in text
 
 
 def test_only_final_failure_is_an_actions_annotation(tmp_path, site, monkeypatch, capsys):

@@ -342,8 +342,8 @@ def test_failed_line_comments_fall_back_to_body_and_state_is_kept(tmp_path):
 
 
 def test_drafts_of_a_day_go_into_one_pr_and_nothing_is_lost(tmp_path):
-    # Один PR в сутки: черновики 12 прогонов копятся в output/cards (между
-    # прогонами — кэш Actions) и все уходят в PR прогона 05:17
+    # Один PR за цикл: черновики прогонов копятся в output/cards (между
+    # прогонами — кэш Actions) и все уходят в PR прогона 05:17 или 17:17
     cards_dir = tmp_path / "cards"
     cards_dir.mkdir()
     db = collect.open_state(tmp_path / "state.sqlite")
@@ -363,13 +363,13 @@ def test_drafts_of_a_day_go_into_one_pr_and_nothing_is_lost(tmp_path):
     assert [e.card["id"] for e in plan.entries] == [f"{7:040x}"]
 
 
-def test_workflow_publishes_once_a_day_or_by_hand():
+def test_workflow_publishes_twice_a_day_or_by_hand():
     wf = (Path(__file__).resolve().parent.parent / ".github" / "workflows" / "harvest.yml").read_text(encoding="utf-8")
     # Прогон публикации узнаётся по строке расписания: она должна совпадать
-    # в списке cron и в условии PUBLISH, а других прогонов в 05:17 быть не должно
-    assert '- cron: "17 5 * * *"' in wf and "github.event.schedule == '17 5 * * *'" in wf
-    assert '- cron: "17 3,7,9,11,13,15,17,19,21 * * *"' in wf
-    assert "inputs.publish == true" in wf and "env.PUBLISH == 'true'" in wf
+    # в списке cron и в case шага «Вид прогона», других прогонов в 05 и 17 нет.
+    # Полная сверка видов и часов — test_workflow_two_cycles_a_day в test_pipeline.py
+    assert '- cron: "47 5,17 * * *"' in wf and '"47 5,17 * * *")  kind=publish' in wf
+    assert "options: [collect, generate, fix, publish]" in wf and "env.PUBLISH == 'true'" in wf
 
 
 def test_bot_refuses_branch_outside_prefix():
