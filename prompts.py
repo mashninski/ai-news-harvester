@@ -173,9 +173,18 @@ def reference_block(site: Path, tarask: bool = False) -> str:
     )
 
 
+# Кэш справочного блока — 5 минут, а не час (журнал сайта, 07.10.2026,
+# «этап 9»): запросы батча идут параллельно, и по логу токенов кэш
+# подхватывает лишь часть из них — остальные пишут блок сами. Запись на
+# 5 минут стоит 1,25× входа, на час — 2×; запросы одного батча стартуют
+# с разницей в секунды, и 5 минут им хватает. Между батчами кэш не живёт
+# ни при каком TTL: генерация и fix — в разных прогонах, раз в 2 часа
+CACHE_CONTROL = {"type": "ephemeral", "ttl": "5m"}
+
+
 def cached_system(site: Path, task: str, tarask: bool = False) -> list[dict]:
     return [
-        {"type": "text", "text": reference_block(site, tarask), "cache_control": {"type": "ephemeral", "ttl": "1h"}},
+        {"type": "text", "text": reference_block(site, tarask), "cache_control": CACHE_CONTROL},
         {"type": "text", "text": task},
     ]
 

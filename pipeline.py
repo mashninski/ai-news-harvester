@@ -24,9 +24,8 @@ Batch API асинхронный: отправленное сегодня при
 
 Генерация и fix — только по флагам --generate и --fix: в Actions это один
 прогон за цикл для каждого, циклов два в сутки (журнал сайта, 03.10.2026,
-«Этап 8г»; 07.10.2026, «Этап 9»). Справочный
-блок кэшируется на час, а прогоны идут раз в 2 часа: батч в каждом прогоне
-платил бы запись кэша заново. Triage — в каждом запуске: он без кэша.
+«Этап 8г»; 07.10.2026, «Этап 9»). Каждый батч пишет справочный блок в кэш
+заново: батч в каждом прогоне платил бы лишние записи. Triage — в каждом запуске: он без кэша.
 
     python pipeline.py                      # забрать готовое, отправить triage
     python pipeline.py --generate --fix     # то же плюс генерация и fix
@@ -105,7 +104,8 @@ PAGE_FETCH_SOURCES = {"deepmind", "huggingface", "mistral"}
 PAGE_PARAGRAPHS = 12
 
 # Цены на 24.09.2026, $ за миллион токенов (спека, §4). Batch — половина.
-# Запись в кэш на 1 час — 2× входа, чтение — 0.1×. Только для отчёта о тратах.
+# Запись в кэш — 1,25× входа (5 минут) или 2× (час), чтение — 0.1×; usage_cost.
+# Только для отчёта о тратах и бюджета.
 PRICES = {llm.TRIAGE_MODEL: (1.0, 5.0), llm.GENERATE_MODEL: (2.0, 10.0)}
 
 # Sonnet 5 по умолчанию думает (adaptive thinking), и размышление идёт в тот же
@@ -343,22 +343,28 @@ def submit(db, client, stage: str, requests: list[dict], hashes: list[str], next
 
 
 def usage_add(acc: dict, model: str, u):
-    a = acc.setdefault(model, {"input": 0, "output": 0, "cache_write": 0, "cache_read": 0})
+    a = acc.setdefault(model, {"input": 0, "output": 0, "cache_write": 0, "cache_read": 0,
+                               "cache_write_1h": 0})
     a["input"] += u.input_tokens or 0
     a["output"] += u.output_tokens or 0
     a["cache_write"] += u.cache_creation_input_tokens or 0
     a["cache_read"] += u.cache_read_input_tokens or 0
+    # Часовая запись дороже 5-минутной; разбивку по TTL отдаёт сам ответ
+    split = getattr(u, "cache_creation", None)
+    a["cache_write_1h"] = a.get("cache_write_1h", 0) + (getattr(split, "ephemeral_1h_input_tokens", 0) or 0)
 
 
 def usage_cost(acc: dict) -> float:
-    """Оценка в $ с учётом скидки Batch API. Запись в кэш считаем по цене
-    часового TTL (2× входа) — так пишет генерация."""
+    """Оценка в $ с учётом скидки Batch API. Запись в кэш — по её TTL:
+    5 минут — 1,25× входа, час — 2× (разбивка из ответа, `cache_write_1h`);
+    чтение — 0,1×."""
     total = 0.0
     for model, a in acc.items():
         # В ответе модель бывает с датой: claude-haiku-4-5-20251001
         pin, pout = next((v for k, v in PRICES.items() if model.startswith(k)), (0, 0))
-        total += (a["input"] * pin + a["cache_write"] * pin * 2 + a["cache_read"] * pin * 0.1
-                  + a["output"] * pout) / 1e6 * 0.5
+        w1h = a.get("cache_write_1h", 0)
+        total += (a["input"] * pin + (a["cache_write"] - w1h) * pin * 1.25 + w1h * pin * 2
+                  + a["cache_read"] * pin * 0.1 + a["output"] * pout) / 1e6 * 0.5
     return total
 
 

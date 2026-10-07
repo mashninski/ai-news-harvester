@@ -913,3 +913,21 @@ def test_collected_batch_log_shows_cache_tokens():
                                                       cache_read_input_tokens=read))
     assert pipeline.tokens_note(acc) == "; токены: вход 4500, ответ 12000, кэш — запись 20700, чтение 41400"
     assert pipeline.tokens_note({}) == ""
+
+
+def test_cache_is_five_minutes_and_priced_by_ttl():
+    # Справочный блок — 5-минутный кэш (запись 1,25× входа вместо 2×)
+    assert prompts.CACHE_CONTROL == {"type": "ephemeral", "ttl": "5m"}
+    # Цена записи — по разбивке ответа: 5 минут 1,25×, час 2×; Sonnet 5 — $2 вход, батч −50%
+    acc = {}
+    pipeline.usage_add(acc, "claude-sonnet-5", NS(input_tokens=0, output_tokens=0,
+                                                  cache_creation_input_tokens=1_000_000, cache_read_input_tokens=0,
+                                                  cache_creation=NS(ephemeral_5m_input_tokens=1_000_000,
+                                                                    ephemeral_1h_input_tokens=0)))
+    assert pipeline.usage_cost(acc) == pytest.approx(1.25)
+    acc = {}
+    pipeline.usage_add(acc, "claude-sonnet-5", NS(input_tokens=0, output_tokens=0,
+                                                  cache_creation_input_tokens=1_000_000, cache_read_input_tokens=0,
+                                                  cache_creation=NS(ephemeral_5m_input_tokens=0,
+                                                                    ephemeral_1h_input_tokens=1_000_000)))
+    assert pipeline.usage_cost(acc) == pytest.approx(2.0)
