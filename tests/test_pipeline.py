@@ -931,3 +931,15 @@ def test_cache_is_five_minutes_and_priced_by_ttl():
                                                   cache_creation=NS(ephemeral_5m_input_tokens=0,
                                                                     ephemeral_1h_input_tokens=1_000_000)))
     assert pipeline.usage_cost(acc) == pytest.approx(2.0)
+
+
+def test_openai_page_is_fetched_and_link_hints_dropped():
+    # Рашэнне аўтара 07.10.2026: анонс OpenAI в фиде — 130–150 знаков, без докачки
+    # ~4 новости из 10 уходили в failed
+    assert "openai" in pipeline.PAGE_FETCH_SOURCES and "openai" in collect.VENDORS
+    html = ("<html><head><title>Sharing AI progress</title></head><body><nav><p>Research. Products.</p></nav>"
+            "<main><p>We have been consulting with the Institute for Advanced Study"
+            " \u2060 <a href='https://ias.edu'>(opens in a new window)</a> to develop best practices.</p>"
+            "<p>Short.</p></main></body></html>")
+    _, body, _ = collect.parse_article(html.encode("utf-8"), max_paragraphs=12)
+    assert body == "We have been consulting with the Institute for Advanced Study to develop best practices."

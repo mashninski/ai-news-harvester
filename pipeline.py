@@ -100,7 +100,10 @@ MIN_BODY_ANY = 150          # меньше и докачать нельзя — 
 # «Ars Technica и Mistral — берём оба»; статья — в <article id="blogpost">).
 # У остальных RSS страницы не скрейпим (спека, §3, п. 4) — Anthropic и так
 # берётся со страницы коллектором.
-PAGE_FETCH_SOURCES = {"deepmind", "huggingface", "mistral"}
+# OpenAI — с 07.10.2026 (рашэнне аўтара, журнал сайта, «этап 9»): в фиде
+# анонс в 130–150 знаков, меньше MIN_BODY_ANY, и ~4 новости из 10 уходили
+# в failed с «мала тэксту»; robots.txt разрешает всё
+PAGE_FETCH_SOURCES = {"deepmind", "huggingface", "mistral", "openai"}
 PAGE_PARAGRAPHS = 12
 
 # Цены на 24.09.2026, $ за миллион токенов (спека, §4). Batch — половина.
@@ -474,7 +477,7 @@ def on_triage(db, res, results, acc):
 # ---------- генерация ----------
 
 def ensure_body(db, m: dict) -> str | None:
-    """Если в фиде мало текста — одна докачка страницы (DeepMind, Hugging Face, Mistral).
+    """Если в фиде мало текста — одна докачка страницы (DeepMind, Hugging Face, Mistral, OpenAI).
     Возвращает ошибку или None."""
     if len(m["body"]) >= MIN_BODY_CHARS:
         return None

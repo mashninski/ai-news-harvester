@@ -192,6 +192,8 @@ def parse_iso(value: str | None) -> datetime | None:
 # Абзацы-ссылки в хвосте записи, а не текст статьи: у Ars Technica каждая
 # запись кончается «Read full article» и «Comments»
 FEED_LINK_LINES = {"Read full article", "Comments"}
+# Подпись у внешних ссылок на страницах OpenAI: «IAS ⁠ (opens in a new window)»
+LINK_HINT_RE = re.compile(r"[\s\u2060]*\(opens in a new window\)")
 
 
 def html_to_text(html: str) -> str:
@@ -298,6 +300,8 @@ def parse_article(html: bytes, max_paragraphs: int = BODY_PARAGRAPHS) -> tuple[s
     paras = []
     for p in scope.find_all("p"):
         text = re.sub(r"\s+", " ", p.get_text(" ", strip=True))
+        # Подпись внешней ссылки у OpenAI — служебная, в пересказ не нужна
+        text = LINK_HINT_RE.sub("", text)
         if len(text) >= 60 and "." in text:
             paras.append(text)
         if len(paras) >= max_paragraphs:
