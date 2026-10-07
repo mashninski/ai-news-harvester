@@ -432,3 +432,87 @@ def fix_user(card_text: str, flagged: list[dict]) -> str:
                         for found, avoid, prefer, note in f["hits"])
         parts.append(f"\n{f['n']}. {f['sentence']}\n   Лінтар: {why}")
     return "\n".join(parts)
+
+
+# ---------- английский текст карточки ----------
+# Лента /en/ai-naviny сайта (спека сайта ai-news-en-spec.md, решения автора
+# 07.10.2026): свой короткий проход по исходной английской статье, а не перевод
+# беларуской карточки. Запрос идёт в том же батче, что генерация (custom_id e-…),
+# потому что текст статьи живёт в состоянии только до черновика (forget_body).
+# Справочного блока нет — стайлгайд и глоссарий про беларуский, — поэтому
+# и кэша нет: запрос маленький. Инструкция на английском: модель пишет
+# по-английски. Беларуский промпт генерации этим не затронут.
+# Правила слоёв — те же, что LAYERS, длина пересказа — RETELLING_WORDS.
+
+EN_TASK = f"""TASK. You write the English version of a card for a news feed about \
+artificial intelligence on a personal website. You get one article from an \
+English-language source, sometimes with a second source on the same story. \
+Write a retelling in your own words, not a paraphrase of the source: compress, \
+put the most important first, never copy the source's sentences.
+
+Facts only from the sources: add nothing, guess nothing. Numbers, names, \
+product and model names exactly as in the source. If there are two sources \
+(<source> and <source2>), use facts from both; if they disagree, say so.
+
+Tone: plain news. No hype, no marketing words, no opinions of your own. \
+Opinions and claims are attributed: "according to the company", "X says".
+
+Dates: do not write the publication date and no relative dates ("today", \
+"yesterday", "this week", "on Tuesday") — the card shows the date separately. \
+An absolute date only when it matters to the story (a release date, a deadline).
+
+Layers without repetition. In the feed the reader sees the title and the \
+thesis; in the full view — title, thesis and retelling. Each next layer adds \
+something new instead of restating the previous one:
+- en_thesis does not repeat the title: the title says what happened, the thesis \
+adds the key detail — where, when, how much, for whom, what changes;
+- en_retelling does not start with the thesis and does not restate it in its \
+first sentence: the first paragraph goes straight to the details;
+- en_retelling is self-contained: every important fact is in it;
+- check: if a sentence can be deleted and a reader of the previous layer loses \
+nothing, rewrite it so it adds something new.
+
+Fields:
+- en_title — headline, up to 110 characters, one sentence, no period at the end.
+- en_thesis — one sentence ending with a period: the key detail that is not in the title.
+- en_retelling — 3–5 paragraphs, {RETELLING_WORDS[0]}–{RETELLING_WORDS[1]} words in \
+total, paragraphs separated by a blank line. First — the details of what happened \
+and who; then context; the last — caveats and what is still unknown, if the source \
+says so.
+
+Quotation marks — typographic “ ” only: a straight " can cut the field. \
+No URLs, markdown, HTML, headings or lists in the text."""
+
+EN_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "en_title": {"type": "string"},
+        "en_thesis": {"type": "string"},
+        "en_retelling": {"type": "string"},
+    },
+    "required": ["en_title", "en_thesis", "en_retelling"],
+    "additionalProperties": False,
+}
+
+
+def en_user(item: dict, company: str = "") -> str:
+    """Тот же материал, что у generate_user, — английскими подписями:
+    основной источник, второй с текстом (<source2>, первый повтор с текстом),
+    остальные повторы заголовками, компания по triage."""
+    also = [(a[0], a[1], a[2] if len(a) > 2 else "") for a in item.get("also", [])]
+    i2 = next((i for i, a in enumerate(also) if a[2].strip()), None)
+    rest = "".join(f"\n- {s}: {t}" for i, (s, t, _) in enumerate(also) if i != i2)
+    second = ""
+    if i2 is not None:
+        s, t, body = also[i2]
+        second = (f"\n\nSecond source — {s}: {t}\n"
+                  f"<source2>\n{truncate_words(body.strip(), SOURCE2_MAX_WORDS)}\n</source2>")
+    return (
+        f"Source: {item['source']}\n"
+        + (f"Company: {company}\n" if company else "")
+        + f"Published (for orientation only, do not write it in the text): {item.get('published_at') or 'unknown'}\n"
+        f"Title: {item['title']}\nURL: {item['url']}\n"
+        + (f"The same story elsewhere (titles only, for context):{rest}\n" if rest else "")
+        + f"\nSource text:\n<source>\n{item['body']}\n</source>"
+        + second
+    )

@@ -59,8 +59,14 @@ BRANCH_PREFIX = "naviny/"
 
 TEXT_FIELDS = ("be_title", "thesis", "summary", "retelling")
 META_FIELDS = ("published_at", "vendor", "category", "importance", "sources")
+# Английский текст для /en/ai-naviny сайта (ai-news-en-spec.md сайта, §3):
+# необязательный, но все три поля или ни одного
+EN_FIELDS = ("en_title", "en_thesis", "en_retelling")
 ID_RE = re.compile(r"^[0-9a-f]{40}$")          # из id делается имя файла — только sha1
 NOTE_FIELD_RE = re.compile(r"^(be_title|thesis|summary|retelling)( \(fix\))?: ")
+# Английские поля — отдельно: NOTE_FIELD_RE ещё и склеивает одинаковые заметки
+# разных полей (note_key), а «en_thesis: …» с «thesis: …» склеивать нельзя
+EN_NOTE_RE = re.compile(r"^(en_title|en_thesis|en_retelling): ")
 QUOTED_RE = re.compile(r"«([^«»]+)»")
 KIND_SUFFIX_RE = re.compile(r" \((?:імя|слова)\)$")
 BODY_LIMIT = 60000                              # GitHub не принимает тело PR длиннее 65 536 знаков
@@ -79,11 +85,19 @@ def site_card(card: dict) -> dict:
     чтобы диф начинался с того, что читают; пересказ — массив абзацев, по
     строке на абзац. Служебного (status, review_notes, lint, narkamauka) нет:
     файл в main и есть «опубликовано», а заметки нужны только на ревью."""
-    return {
+    sc = {
         "be_title": card["be_title"].strip(),
         "thesis": card["thesis"].strip(),
         "summary": " ".join(card["summary"].split()),
         "retelling": paragraphs(card["retelling"]),
+    }
+    # Английский текст — сразу за беларуским, тоже наверху файла; у карточек
+    # без него полей нет вовсе (на /en сайта такая карточка не показывается)
+    if all(card.get(f) for f in EN_FIELDS):
+        sc["en_title"] = card["en_title"].strip()
+        sc["en_thesis"] = card["en_thesis"].strip()
+        sc["en_retelling"] = paragraphs(card["en_retelling"])
+    return sc | {
         "published_at": card["published_at"],
         "vendor": card["vendor"],
         "vendor_name": card.get("vendor_name", ""),
@@ -132,6 +146,7 @@ def check(card: dict) -> tuple[list[str], list[dict]]:
     sources = card.get("sources") or []
     if not all(isinstance(s, dict) and str(s.get("url", "")).startswith("http") for s in sources):
         fatal.append("у крыніцы няма спасылкі")
+    fatal += en_fatal(card)
     if fatal:
         return fatal, notes
 
@@ -151,7 +166,50 @@ def check(card: dict) -> tuple[list[str], list[dict]]:
         if m := re.search(r'"[^"\n]{0,40}"?', t):
             notes.append({"kind": "публікацыя", "detail": f"{f}: простыя двукоссі «{m.group()}» — у JSON яны "
                                                           "з адваротнай касой рысай, лепш «ёлачкі»"})
+    if card.get("en_title") not in (None, "", []):
+        for f in EN_FIELDS:
+            t = card[f]
+            if f == "en_title" and t.strip().endswith("."):
+                notes.append({"kind": "публікацыя", "detail": "en_title: кропка ў канцы загалоўка"})
+            if f == "en_thesis" and lint.truncated(t):
+                notes.append({"kind": "публікацыя",
+                              "detail": "en_thesis: не канчаецца канцом сказа — абарваны ці няма кропкі"})
+            if m := re.search(r"<!--.*?-->|<!--", t):
+                notes.append({"kind": "публікацыя", "detail": f"{f}: HTML-камэнтар «{m.group()}» — на сайце будзе бачны"})
     return fatal, notes
+
+
+def en_fatal(card: dict) -> list[str]:
+    """Почему английский текст нельзя публиковать. Беларускую карточку он
+    не держит: plan_pr такой текст снимает с заметкой «en», пайплайн — ещё
+    раньше (ai-news-en-spec.md сайта, §4). Копия — enFatal в naviny.ts сайта,
+    сверяет test_check_same_as_site_dashboard."""
+    present = [f for f in EN_FIELDS if card.get(f) not in (None, "", [])]
+    if not present:
+        return []
+    if len(present) < len(EN_FIELDS):
+        return [f"англійскі тэкст: ёсць {', '.join(present)} — трэба ўсе тры палі або ніводнага"]
+    out = []
+    for f in EN_FIELDS:
+        t = card[f]
+        if not isinstance(t, str) or not t.strip():
+            out.append(f"{f} пусты")
+            continue
+        if f == "en_retelling" and lint.truncated(t):
+            out.append(f"{f} абрываецца: «…{t.strip()[-40:]}»")
+        if "{{" in t or "}}" in t:
+            out.append(f"{f}: разметка {{{{…}}}} — у англійскім тэксце яе няма")
+    return out
+
+
+def without_english(card: dict) -> tuple[dict, list[dict]]:
+    """Карточка без сломанного английского и заметка «en» о нём. Английский
+    в порядке или его нет — карточка как была."""
+    problems = en_fatal(card)
+    if not problems:
+        return card, []
+    return ({k: v for k, v in card.items() if k not in EN_FIELDS},
+            [{"kind": "en", "detail": "англійскі тэкст не ўвайшоў: " + "; ".join(problems)}])
 
 
 # ---------- заметки о содержании: только здесь, не на сайте ----------
@@ -268,6 +326,9 @@ def anchor(note: dict, sc: dict, lines: dict[str, int]) -> int:
     («retelling: …»); в пересказе — абзац, где стоит процитированное
     («было» → «стало» ищется по «стало»). Не нашлось — строка поля; заметка
     без поля (крыніца, тэрмін) — строка заголовка."""
+    # Заметка об английском поле — к его строке (поля нет — к заголовку)
+    if en := EN_NOTE_RE.match(note.get("detail", "")):
+        return lines.get(en.group(1), lines["be_title"])
     m = NOTE_FIELD_RE.match(note.get("detail", ""))
     if not m:
         return lines["be_title"]
@@ -410,6 +471,7 @@ def plan_pr(cards: list[dict], broken: list, done: set[str], base: str, when: da
     for c in cards:
         if c.get("id") in done:
             continue
+        c, en_notes = without_english(c)
         fatal, extra = check(c)
         if fatal:
             skipped.append((str(c.get("id", "?")), str(c.get("be_title") or ""), fatal))
@@ -417,7 +479,7 @@ def plan_pr(cards: list[dict], broken: list, done: set[str], base: str, when: da
         sc = site_card(c)
         path = card_path(c["id"])
         text = render(sc)
-        notes = list(c.get("review_notes") or []) + extra + content_notes(c)
+        notes = list(c.get("review_notes") or []) + en_notes + extra + content_notes(c)
         e = Entry(c, sc, path, text, notes)
         e.comments = comments_for(path, sc, text, notes)
         entries.append(e)

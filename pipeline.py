@@ -61,6 +61,7 @@ import collect
 import lint
 import llm
 import prompts
+import publish
 import tarask
 
 ROOT = Path(__file__).resolve().parent
@@ -115,8 +116,8 @@ PRICES = {llm.TRIAGE_MODEL: (1.0, 5.0), llm.GENERATE_MODEL: (2.0, 10.0)}
 # лимит, что и ответ: при 4000 токенов 17 генераций из 20 на корпусе обрезались
 # посреди размышления (журнал сайта, 24.09.2026). Поэтому лимит с запасом,
 # а глубина размышления задаётся явно — effort
-MAX_TOKENS = {"triage": 400, "generate": 16000, "fix": 8000}
-EFFORT = {"generate": "medium", "fix": "low"}   # генерация — язык, на ней не экономим (спека, §3)
+MAX_TOKENS = {"triage": 400, "generate": 16000, "fix": 8000, "en": 6000}
+EFFORT = {"generate": "medium", "fix": "low", "en": "low"}   # генерация — язык, на ней не экономим (спека, §3)
 
 # Орфография карточек. Тарашкевіца выключена решением автора 02.10.2026 (журнал
 # сайта): конвертер taraskevizer ошибается, свой ещё не написан. narkamauka —
@@ -329,19 +330,23 @@ def enroll_new(db, now: datetime) -> int:
 # ---------- батчи ----------
 
 def custom_id(stage: str, h: str) -> str:
-    return f"{stage[0]}-{h}"   # t-/g-/f- и sha1: 42 знака, в лимит API (64) влезает
+    return f"{stage[0]}-{h}"   # t-/g-/f-/e- и sha1: 42 знака, в лимит API (64) влезает
 
 
 def submit(db, client, stage: str, requests: list[dict], hashes: list[str], next_stage: str):
     if not requests:
         return None
     batch = client.messages.batches.create(requests=requests)
+    # В requests батча — материалы, а не запросы: у генерации на материал два
+    # запроса (беларуский и английский, e-…), а суточный потолок генераций
+    # (generated_since) — про беларуские (ai-news-en-spec.md сайта, §4)
     db.execute("INSERT INTO batch (id, stage, requests, submitted_at) VALUES (?, ?, ?, ?)",
-               (batch.id, stage, len(requests), now_iso()))
+               (batch.id, stage, len(hashes), now_iso()))
     for h in hashes:
         set_stage(db, h, next_stage, batch_id=batch.id)
     db.commit()
-    print(f"Отправлен батч {stage}: {batch.id}, запросов {len(requests)}")
+    extra = f" (з іх англійскіх {len(requests) - len(hashes)})" if len(requests) > len(hashes) else ""
+    print(f"Отправлен батч {stage}: {batch.id}, запросов {len(requests)}{extra}")
     return batch.id
 
 
@@ -399,6 +404,7 @@ def collect_batches(db, client, res: Resources) -> int:
             pending += 1
             continue
         acc: dict = {}
+        en_acc: dict = {}       # английские запросы генерации отдельно — их цена в логе своей строкой
         handler = {"triage": on_triage, "generate": on_generate, "fix": on_fix}[stage]
         sent = f"{stage}_sent"
         # Только материалы, которые всё ещё ждут именно этот батч: если прошлый
@@ -410,6 +416,8 @@ def collect_batches(db, client, res: Resources) -> int:
         for r in results:
             if r.result.type == "succeeded":
                 usage_add(acc, r.result.message.model, r.result.message.usage)
+                if r.custom_id.startswith("e-"):
+                    usage_add(en_acc, r.result.message.model, r.result.message.usage)
         handler(db, res, results, acc)
         # Материалы батча, по которым результата не пришло вовсе, — назад
         seen_ids = {r.custom_id for r in results}
@@ -419,11 +427,20 @@ def collect_batches(db, client, res: Resources) -> int:
             if custom_id(stage, h) not in seen_ids:
                 fail_step(db, h, back, "результата в батче нет")
         cost = usage_cost(acc)
+        usage = {"tokens": acc, "usd": round(cost, 4)}
+        en_n = sum(r.custom_id.startswith("e-") for r in results)
+        if en_n:
+            usage["en_usd"] = round(usage_cost(en_acc), 4)
         db.execute("UPDATE batch SET collected_at = ?, usage = ? WHERE id = ?",
-                   (now_iso(), json.dumps({"tokens": acc, "usd": round(cost, 4)}), batch_id))
+                   (now_iso(), json.dumps(usage), batch_id))
         db.commit()
         print(f"Забран батч {stage} {batch_id}: {len(results)} результатов, ≈ ${cost:.4f}"
               + tokens_note(acc))
+        if en_n:
+            # Цена английского текста отдельно — сверка с оценкой ≈ $0,01 на карточку
+            # (ai-news-en-plan.md сайта, §1); она уже входит в сумму строкой выше
+            print(f"  из них английский текст: {en_n} результатов, ≈ ${usage['en_usd']:.4f}"
+                  + tokens_note(en_acc))
     return pending
 
 
@@ -497,6 +514,28 @@ def ensure_body(db, m: dict) -> str | None:
     return None
 
 
+def company(db, h: str) -> str:
+    """Компания материала по triage — для английского запроса: название, которое
+    дал triage, а без него — слаг вендора (openai, google…), его модель понимает."""
+    vendor, payload = db.execute("SELECT vendor, payload FROM item WHERE hash = ?", (h,)).fetchone()
+    name = json.loads(payload or "{}").get("vendor_name", "")
+    return name or (vendor if vendor and vendor != "other" else "")
+
+
+def en_request(m: dict, company_name: str) -> dict:
+    """Английский текст карточки — тем же батчем, что генерация (e-<hash>):
+    текст статьи живёт в состоянии только до черновика. Без справочного блока
+    и кэша, effort low (ai-news-en-spec.md сайта, §4)."""
+    return {"custom_id": custom_id("en", m["hash"]), "params": {
+        "model": llm.GENERATE_MODEL,
+        "max_tokens": MAX_TOKENS["en"],
+        "system": prompts.EN_TASK,
+        "messages": [{"role": "user", "content": prompts.en_user(m, company_name)}],
+        "output_config": {"effort": EFFORT["en"],
+                          "format": {"type": "json_schema", "schema": prompts.EN_SCHEMA}},
+    }}
+
+
 def generate_request(res: Resources, m: dict) -> dict:
     return {"custom_id": custom_id("generate", m["hash"]), "params": {
         "model": llm.GENERATE_MODEL,
@@ -537,6 +576,7 @@ def submit_generate(db, client, res: Resources, limit: int = MAX_GENERATE_PER_RU
             fail_step(db, h, "triaged", err)
             continue
         reqs.append(generate_request(res, m))
+        reqs.append(en_request(m, company(db, h)))
         hashes.append(h)
     db.commit()
     return submit(db, client, "generate", reqs, hashes, "generate_sent")
@@ -597,8 +637,30 @@ def process_generated(res: Resources, drafts: dict[str, dict]) -> dict[str, dict
     return out
 
 
+def english(result) -> tuple[dict | None, str | None]:
+    """(поля en_* для черновика, почему их нет). Механика — кодом: точка
+    в конце заголовка снимается. Сломанное — None с причиной: беларускую
+    карточку оно не держит, повтора нет — текст статьи к тому времени
+    стёрт (ai-news-en-spec.md сайта, §4)."""
+    if result is None:
+        return None, "адказу ў батчы няма"
+    data, err, _ = result_json(result)
+    if err:
+        return None, err
+    en = {f: str(data.get(f, "")).strip() for f in publish.EN_FIELDS}
+    if en["en_title"].endswith(".") and not en["en_title"].endswith(".."):
+        en["en_title"] = en["en_title"][:-1].rstrip()
+    problems = publish.en_fatal(en) or [f"{f} пусты" for f in publish.EN_FIELDS if not en[f]]
+    if any(x in en[f] for f in publish.EN_FIELDS for x in ("<!--", "http://", "https://")):
+        problems.append("у тэксце HTML-камэнтар ці спасылка")
+    return (None, "; ".join(problems)) if problems else (en, None)
+
+
 def on_generate(db, res, results, acc):
     drafts, term_notes = {}, {}
+    # Английские ответы (e-…) — к своему материалу; беларуские разбираются как раньше
+    en_results = {r.custom_id.split("-", 1)[1]: r for r in results if r.custom_id.startswith("e-")}
+    results = [r for r in results if not r.custom_id.startswith("e-")]
     for r in results:
         h = r.custom_id.split("-", 1)[1]
         data, err, _ = result_json(r)
@@ -617,6 +679,12 @@ def on_generate(db, res, results, acc):
         drafts[h] = nk
     for h, p in process_generated(res, drafts).items():
         p["notes"] = term_notes[h] + p["notes"]
+        en, why = english(en_results.get(h))
+        if en:
+            p["en"] = en
+        else:
+            p["notes"].append({"kind": "en", "detail": f"англійскага тэксту няма: {why}"})
+            log.warning("%s: англійскага тэксту няма: %s", h[:8], why[:200])
         prev = json.loads(db.execute("SELECT payload FROM item WHERE hash = ?", (h,)).fetchone()[0] or "{}")
         payload = {**prev, **p}
         if p["flagged"]:
@@ -723,6 +791,8 @@ def build_card(db, h: str, p: dict) -> dict:
         "thesis": tarask.strip_names(p["tk"]["thesis"]),
         "summary": tarask.strip_names(p["tk"]["summary"]),
         "retelling": tarask.strip_names(p["tk"]["retelling"]),
+        # Английский текст для /en/ai-naviny — когда он пришёл и прошёл проверки
+        **(p.get("en") or {}),
         "review_notes": notes,
         # Что пометил линтер и что сделал fix: видно, где срабатывания ложные
         "lint": p.get("fix_log", []),

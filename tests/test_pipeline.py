@@ -226,7 +226,7 @@ class FakeBatches:
     def results(self, bid):
         out = []
         for r in self.store[bid]["requests"]:
-            stage = {"t": "triage", "g": "generate", "f": "fix"}[r["custom_id"][0]]
+            stage = {"t": "triage", "g": "generate", "f": "fix", "e": "en"}[r["custom_id"][0]]
             ans = self.answer(stage, r["params"])
             if ans is None:
                 out.append(NS(custom_id=r["custom_id"], result=NS(type="errored", error="boom")))
@@ -286,6 +286,12 @@ def answers(stage, params):
                              + "Пра гэта сказаў {{name:Рохін Шах}}.\n\nДругі абзац пра {{term:bogus|нешта}}."}
     if stage == "fix":
         return {"fixes": [{"n": 1, "sentence": "Мадэль — найбольшая.", "changed": True}]}
+    if stage == "en":
+        return EN_ANSWER
+
+
+EN_ANSWER = {"en_title": "The company releases a model.", "en_thesis": "Fine-tuning took a week.",
+             "en_retelling": "The model is the largest, Rohin Shah said.\n\nSecond paragraph."}
 
 
 def no_converter(*a, **k):
@@ -593,8 +599,10 @@ def past_batch(db, bid, stage, requests, submitted_at, usd=None):
 
 
 def generate_requests(client):
+    """Беларуских генераций в каждом батче генерации; английские (e-…) идут
+    тем же батчем и не считаются — потолок про беларуские."""
     b = client.messages.batches
-    return [len(b.store[i]["requests"]) for i in b.created
+    return [sum(r["custom_id"].startswith("g-") for r in b.store[i]["requests"]) for i in b.created
             if b.store[i]["requests"][0]["custom_id"].startswith("g-")]
 
 
@@ -696,7 +704,8 @@ def test_generation_takes_important_then_freshest_and_expires_stale(tmp_path, si
     db.commit()
     client = fake_client(answers)
     pipeline.run_once(db, client, pipeline.Resources(site, "narkamauka"), limit=2, now=NOW)
-    sent = [r["custom_id"][2:] for r in client.messages.batches.store["msgbatch_0"]["requests"]]
+    sent = [r["custom_id"][2:] for r in client.messages.batches.store["msgbatch_0"]["requests"]
+            if r["custom_id"].startswith("g-")]
     assert sent == [hs[2], hs[1]]
     stages = dict(db.execute("SELECT hash, stage FROM item"))
     assert stages[hs[0]] == "triaged" and stages[hs[3]] == "too_old"

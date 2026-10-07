@@ -437,6 +437,13 @@ PARITY_CASES = [
          retelling='Абзац.\n\nПра рэжым "max" і <!-- guard -->SVG.\n\n{{name:Саймон Ўілісан}} сказаў.'),
     card(thesis="Тэзіс пра {{term:token|токены} без дужкі.", summary="Цытата: «так».)"),
     card(summary="Канец з цытатай.»", retelling="Абзац з <!-- незакрытым камэнтаром."),
+    # Английский текст для /en/ai-naviny (ai-news-en-spec.md сайта, §3)
+    card(en_title="A title", en_thesis="A thesis.", en_retelling="One.\n\nTwo."),
+    card(en_title="Only a title"),
+    card(en_title="A", en_thesis="B.", en_retelling="One.\n\nCut in the mid"),
+    card(en_title="A title.", en_thesis="No period", en_retelling="With <!-- x --> comment.\n\nTwo."),
+    card(en_title="A", en_thesis="A {{term:x|y}} thesis.", en_retelling="One."),
+    card(en_title="A", en_thesis="   ", en_retelling="One."),
 ]
 
 
