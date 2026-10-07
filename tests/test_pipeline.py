@@ -902,3 +902,14 @@ def test_only_final_failure_is_an_actions_annotation(tmp_path, site, monkeypatch
     warnings = [l for l in capsys.readouterr().out.splitlines() if "снят после" in l]
     assert warnings == [l for l in warnings if l.startswith(f"::warning::{h[:8]}: снят после {pipeline.MAX_ATTEMPTS} попыток")]
     assert len(warnings) == 1
+
+
+def test_collected_batch_log_shows_cache_tokens():
+    # По записи и чтению кэша в логе видно, делят ли запросы батча кэш
+    acc = {}
+    for write, read in ((20700, 0), (0, 20700), (0, 20700)):
+        pipeline.usage_add(acc, "claude-sonnet-5", NS(input_tokens=1500, output_tokens=4000,
+                                                      cache_creation_input_tokens=write,
+                                                      cache_read_input_tokens=read))
+    assert pipeline.tokens_note(acc) == "; токены: вход 4500, ответ 12000, кэш — запись 20700, чтение 41400"
+    assert pipeline.tokens_note({}) == ""

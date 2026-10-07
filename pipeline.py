@@ -413,8 +413,21 @@ def collect_batches(db, client, res: Resources) -> int:
         db.execute("UPDATE batch SET collected_at = ?, usage = ? WHERE id = ?",
                    (now_iso(), json.dumps({"tokens": acc, "usd": round(cost, 4)}), batch_id))
         db.commit()
-        print(f"Забран батч {stage} {batch_id}: {len(results)} результатов, ≈ ${cost:.4f}")
+        print(f"Забран батч {stage} {batch_id}: {len(results)} результатов, ≈ ${cost:.4f}"
+              + tokens_note(acc))
     return pending
+
+
+def tokens_note(acc: dict) -> str:
+    """Токены батча для лога: вход, ответ (с размышлением), запись и чтение
+    кэша. По записи и чтению видно, делят ли запросы батча кэш справочного
+    блока (открытый вопрос в open-questions.md сайта): общий — одна запись
+    и чтения у остальных, нет — запись у каждого."""
+    t = {k: sum(a[k] for a in acc.values()) for k in ("input", "output", "cache_write", "cache_read")}
+    if not any(t.values()):
+        return ""
+    return (f"; токены: вход {t['input']}, ответ {t['output']},"
+            f" кэш — запись {t['cache_write']}, чтение {t['cache_read']}")
 
 
 # ---------- triage ----------
