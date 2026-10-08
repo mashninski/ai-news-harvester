@@ -443,6 +443,15 @@ GENERATE_SCHEMA = {
 SOURCE2_MAX_WORDS = 600
 
 
+def source_words(item: dict) -> int:
+    """Сколько слов текста источников видит генерация: основной и <source2>
+    (тот же выбор, что в generate_user). По нему publish.content_notes решает,
+    нужна ли заметка о коротком пересказе (рашэнне аўтара 09.10.2026)."""
+    n = len(item.get("body", "").split())
+    second = next((a[2] for a in item.get("also", []) if len(a) > 2 and a[2].strip()), "")
+    return n + min(len(second.split()), SOURCE2_MAX_WORDS)
+
+
 def generate_user(item: dict) -> str:
     """item: source, title, url, published_at, body, also — склеенные повторы
     [(source, title, body)], body пустой у позднего повтора. Первый повтор

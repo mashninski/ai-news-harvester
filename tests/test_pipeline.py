@@ -328,6 +328,7 @@ def test_full_cycle_across_runs(tmp_path, site, monkeypatch, ortho):
     card = json.loads((tmp_path / "cards" / f"{h2}.json").read_text(encoding="utf-8"))
     assert card["status"] == "draft" and card["importance"] == 3 and card["vendor"] == "openai"
     assert card["orthography"] == ortho
+    assert isinstance(card["source_words"], int) and card["source_words"] > 0   # для заметки о длине
     assert card["retelling"].startswith("Мадэль — найбольшая.")          # fix встал на место
     assert card["lint"][0]["changed"] and card["lint"][0]["hits"] == ["з'яўляецца"]
     assert "Рохін Шах" in card["retelling"] and "{{name:" not in card["retelling"]  # guard + маркер снят

@@ -218,6 +218,32 @@ def test_length_rule_caps_long_and_does_not_pad_short():
     assert f"{hi} words is a cap" in publish.prompts.EN_TASK and "do not pad" in publish.prompts.EN_TASK
 
 
+def test_short_retelling_noted_only_for_long_source():
+    # Рашэнне аўтара 09.10.2026: короткий источник — короткий пересказ, не ошибка
+    lo, hi = publish.prompts.RETELLING_WORDS
+    long_src = publish.SHORT_NOTE_SOURCE_WORDS
+    short = "Слова " * 89 + "канец."                                              # 90 слоў
+    assert notes_of(card(retelling=short, source_words=long_src - 1), "retelling: ") == []
+    assert notes_of(card(retelling=short, source_words=long_src), "retelling: ") == [
+        f"retelling: 90 слоў — норма {lo}–{hi}, крыніца {long_src} слоў"]
+    # Черновик без поля (до 09.10.2026) — заметка, как раньше
+    assert notes_of(card(retelling=short), "retelling: ") == [f"retelling: 90 слоў — норма {lo}–{hi}"]
+    # Длиннее нормы — заметка всегда, длина источника не важна
+    long = "\n\n".join(["Слова " * 79 + "канец."] * 3)                          # 240 слоў
+    assert notes_of(card(retelling=long, source_words=50), "retelling: ") == [f"retelling: 240 слоў — норма {lo}–{hi}"]
+    # source_words на сайт не едет
+    assert "source_words" not in publish.site_card(card(source_words=500))
+
+
+def test_source_words_counts_what_generation_sees():
+    sw = publish.prompts.source_words
+    assert sw({"body": "раз два тры"}) == 3
+    # <source2> — первый повтор с текстом, не длиннее SOURCE2_MAX_WORDS
+    big = "слова " * (publish.prompts.SOURCE2_MAX_WORDS + 50)
+    item = {"body": "раз два", "also": [("a", "t", ""), ("b", "t", big), ("c", "t", "ещё сто слоў")]}
+    assert sw(item) == 2 + publish.prompts.SOURCE2_MAX_WORDS
+
+
 def test_content_notes_go_to_pr_comments_not_into_check():
     c = pr1_cards()["d02470a"]
     full = card(5, **c)

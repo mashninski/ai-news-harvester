@@ -900,6 +900,9 @@ def build_card(db, h: str, p: dict) -> dict:
         "category": item[0],
         "importance": item[2],
         "sources": m["sources"],
+        # Сколько слов источников видела генерация — для заметки о коротком
+        # пересказе (publish.content_notes). На сайт не идёт: site_card — белый список
+        "source_words": prompts.source_words(m),
         # Орфография — по AI_NEWS_ORTHOGRAPHY; термины размечены {{term:slug|форма}},
         # подстановка при рендере (этап 6)
         "be_title": tarask.strip_names(p["tk"]["be_title"]),

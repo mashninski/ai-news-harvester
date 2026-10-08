@@ -302,6 +302,13 @@ def repeat_share(thesis: str, other: str) -> float:
     return shared / len(t) if t and shared >= REPEAT_MIN_SHARED else 0.0
 
 
+# Заметка «пересказ короче нормы» — только когда источник не короче этого
+# (рашэнне аўтара 09.10.2026, ai-news-plan.md сайта, «Этап 12»): нижняя
+# граница нормы меньше трети такого текста. На данных не подобрано —
+# тексты прошлых источников из состояния уже стёрты
+SHORT_NOTE_SOURCE_WORDS = 400
+
+
 def content_notes(card: dict) -> list[dict]:
     """Заметки «публікацыя» о содержании: относительные даты, длина пересказа,
     повтор тезиса. Карточка с ними в PR идёт — это не check()."""
@@ -316,9 +323,14 @@ def content_notes(card: dict) -> list[dict]:
                                                           "састарэе, дата публікацыі ўжо ёсьць у картцы"})
     lo, hi = prompts.RETELLING_WORDS
     n = word_count(card["retelling"])
-    if not lo <= n <= hi:
+    src = card.get("source_words")
+    # Короткий пересказ короткого источника — норма (prompts.LENGTH: не добирать);
+    # заметка — когда источник длинный и модель, похоже, потеряла факты.
+    # Нет поля (черновик до 09.10.2026) — заметка, как раньше
+    if n > hi or (n < lo and (src is None or src >= SHORT_NOTE_SOURCE_WORDS)):
+        tail = f", крыніца {src} {plural(src, 'слова', 'словы', 'слоў')}" if n < lo and src is not None else ""
         notes.append({"kind": "публікацыя", "detail": f"retelling: {n} {plural(n, 'слова', 'словы', 'слоў')}"
-                                                      f" — норма {lo}–{hi}"})
+                                                      f" — норма {lo}–{hi}{tail}"})
     first = paragraphs(card["retelling"])[0]
     if (share := repeat_share(card["thesis"], first)) > REPEAT_SHARE:
         # Начало абзаца до первой «ёлачкі»: иначе цитата в заметке разорвётся
