@@ -76,7 +76,17 @@ vendor — чыя гэта навіна: кампанія, пра мадэль �
 Google DeepMind — google. Калі вендара няма наогул (заканадаўства, аналітыка \
 рынку) — other і пусты vendor_name.
 
-reason — адна кароткая фраза, чаму такая важнасць. Пішы па-беларуску."""
+reason — адна кароткая фраза, чаму такая важнасць. Пішы па-беларуску.
+
+Паўторы. У запыце ёсць спіс «Ужо ёсць у стужцы» — англійскія загалоўкі матэрыялаў, \
+з якіх картка ўжо ёсць ці будзе. Вызначы, ці не пра тую ж падзею гэты матэрыял. \
+Тая ж падзея — той жа факт: той жа выпуск, тая ж здзелка, той жа ўказ, той жа інцыдэнт, \
+хоць і іншымі словамі, у іншай крыніцы ці ў іншым фармаце (відэа, падкаст, допіс). \
+Тая ж кампанія ці падобная тэма — яшчэ не тая ж падзея.
+same_as — нумар са спісу, калі падзея тая ж; 0 — калі такой у спісе няма.
+adds_new — true, калі матэрыял пра тую ж падзею дадае новае: новыя факты ці лічбы, \
+разбор, наступствы, адказ іншага боку. false — калі гэта той жа пераказ той жа навіны. \
+Калі same_as = 0 — false."""
 
 TRIAGE_SCHEMA = {
     "type": "object",
@@ -87,17 +97,24 @@ TRIAGE_SCHEMA = {
         "vendor_name": {"type": "string"},
         "importance": {"type": "integer", "enum": [1, 2, 3]},
         "reason": {"type": "string"},
+        "same_as": {"type": "integer"},
+        "adds_new": {"type": "boolean"},
     },
-    "required": ["is_ai", "category", "vendor", "vendor_name", "importance", "reason"],
+    "required": ["is_ai", "category", "vendor", "vendor_name", "importance", "reason", "same_as", "adds_new"],
     "additionalProperties": False,
 }
 
 TRIAGE_LEAD_CHARS = 900   # «заголовок + лид ~250 токенов» (спека, §3, п. 2)
 
 
-def triage_user(source: str, title: str, body: str) -> str:
+def triage_user(source: str, title: str, body: str, known: list[tuple[str, str]] = ()) -> str:
+    """known — «что уже есть» для проверки дубля (этап 11, ai-news-plan.md сайта):
+    [(источник, английский заголовок)], номер в ответе same_as — с 1 по порядку.
+    Только заголовки: ≈ 20 токенов на строку, оценка этапа — ≈ +$1–1,5/мес."""
     lead = body[:TRIAGE_LEAD_CHARS].rsplit(" ", 1)[0] if len(body) > TRIAGE_LEAD_CHARS else body
-    return f"Крыніца: {source}\nЗагаловак: {title}\n\nПачатак тэксту:\n{lead or '(тэксту ў фідзе няма)'}"
+    listed = "".join(f"\n{i}. {s}: {t}" for i, (s, t) in enumerate(known, 1)) or "\n(пуста)"
+    return (f"Крыніца: {source}\nЗагаловак: {title}\n\nПачатак тэксту:\n{lead or '(тэксту ў фідзе няма)'}"
+            f"\n\nУжо ёсць у стужцы:{listed}")
 
 
 # ---------- общий справочный блок (генерация и fix) ----------
@@ -278,6 +295,19 @@ LAYERS = """Слаі карткі — без паўтораў. Чытач бач
 запіс на апавяшчэнне аб тым, калі адкрыецца рэгістрацыя; праграма і спікеры не названыя.»"""
 
 
+# Чего нет в источнике — не пишем (этап 11, ai-news-plan.md сайта; рашэнне
+# аўтара 08.10.2026). До того промпт требовал последним абзацем «агаворкі і што
+# пакуль невядома», и модель заполняла его почти всегда перечнем того, чего
+# в тексте нет, — в 36 карточках из 91, даже когда это было в источнике
+# картинкой или видео, которых бот не видит. Оговорки самого источника
+# остаются. Те же фразы ловит линтер (lint.BUILTIN, «спасылка на крыніцу»)
+SOURCE_SILENCE = """Агаворкі — толькі тыя, што робіць сама крыніца: «кампанія папярэджвае, \
+што…», «даследчыкі адзначаюць абмежаванне…». Не пішы, чаго ў крыніцы няма і пра што \
+яна маўчыць: ні «крыніца не называе…», ні «у матэрыяле не паведамляецца…», ні «невядома \
+таксама…», ні што тэкст крыніцы кароткі ці абарваны. У крыніцы бываюць выявы, відэа \
+і табліцы, якіх ты не бачыш, таму «у крыніцы гэтага няма» часта няпраўда. Фактаў мала — \
+пераказ карацейшы, а не даўжэйшы за кошт таго, чаго няма."""
+
 # Норма длины пересказа в словах. Одно число на промпт и на заметку публикации
 # (publish.content_notes): правится здесь — меняется и то и другое
 RETELLING_WORDS = (120, 220)
@@ -318,8 +348,9 @@ def _generate_task(tarask: bool) -> str:
 - summary — 2–3 сказы: што новага пасля тэзіса і чаму гэта важна.
 - retelling — пераказ для акна з поўным тэкстам: 3–5 абзацаў, разам {RETELLING_WORDS[0]}–{RETELLING_WORDS[1]} слоў, \
 абзацы праз пусты радок. Першы абзац — падрабязнасці таго, што здарылася і хто, \
-без паўтору тэзіса. Далей — кантэкст. Апошні — агаворкі і што пакуль невядома, \
-калі гэта ёсць у крыніцы.
+без паўтору тэзіса. Далей — кантэкст.
+
+{SOURCE_SILENCE}
 
 Разметка ў thesis, summary і retelling (у be_title — не):
 - Тэрмін з глосарыя абгортвай так: {{{{term:слаг|слова ў патрэбнай форме}}}}. Слаг — \
@@ -397,6 +428,9 @@ FIX_TASK = f"""ЗАДАЧА. Лінтар знайшоў у картцы бел�
 - калі замена патрабуе перабудаваць сказ — перабудуй, захоўваючы сэнс і ўсе факты;
 - калі лінтар памыліўся (слова ўжыта ў правільным сэнсе, напрыклад «наступны год») — \
 вярні сказ без змен і changed = false;
+- калі лінтар знайшоў, што сказ кажа пра саму крыніцу — чаго ў ёй няма ці што яна \
+не называе, — выкрасль гэтую частку сказа; калі ў сказе больш нічога няма, вярні \
+пусты радок (sentence = "", changed = true): такі сказ выдаляецца;
 - мова — наркамаўка, як у картцы; маркеры {{{{term:…|…}}}} і {{{{name:…}}}} захоўвай \
 як ёсць, можна змяніць толькі форму слова ўнутры term-маркера пасля «|».
 
@@ -477,8 +511,13 @@ Fields:
 - en_thesis — one sentence ending with a period: the key detail that is not in the title.
 - en_retelling — 3–5 paragraphs, {RETELLING_WORDS[0]}–{RETELLING_WORDS[1]} words in \
 total, paragraphs separated by a blank line. First — the details of what happened \
-and who; then context; the last — caveats and what is still unknown, if the source \
-says so.
+and who; then context.
+
+Caveats only where the source itself makes them ("the company warns that…"). \
+Do not write what the source does not say or what is missing from it — no \
+"the source does not specify…", "it is unclear…", "the text cuts off": the \
+source may have images, video and tables you do not see. Few facts — a shorter \
+retelling, not a longer one about what is absent.
 
 Quotation marks — typographic “ ” only: a straight " can cut the field. \
 No URLs, markdown, HTML, headings or lists in the text."""

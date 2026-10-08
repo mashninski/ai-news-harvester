@@ -274,7 +274,7 @@ def seed(db, n=3):
 def answers(stage, params):
     if stage == "triage":
         text = params["messages"][0]["content"]
-        imp = 1 if "Title 0" in text else 3          # первый — мусор, отсекается
+        imp = 1 if "Загаловак: Title 0\n" in text else 3   # первый — мусор; ниже ещё список «что уже есть»
         return {"is_ai": True, "category": "product", "vendor": "openai", "vendor_name": "OpenAI",
                 "importance": imp, "reason": "тэст"}
     if stage == "generate":

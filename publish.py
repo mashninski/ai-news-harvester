@@ -25,6 +25,7 @@ Anthropic API здесь не вызывается.
 """
 
 import argparse
+import base64
 import json
 import logging
 import os
@@ -32,7 +33,7 @@ import re
 import sqlite3
 import sys
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import requests
@@ -379,6 +380,19 @@ class Entry:
     text: str
     notes: list[dict]
     comments: list[dict] = field(default_factory=list)
+    linked: list[str] = field(default_factory=list)     # повторы, вошедшие в «Крыніцы» карточки
+
+
+@dataclass
+class Edit:
+    """Правка опубликованной карточки: в «Крыніцы» дописан повтор события,
+    больше в файле ничего не меняется."""
+    id: str
+    site: dict
+    path: str
+    text: str
+    added: list[dict]
+    linked: list[str]
 
 
 @dataclass
@@ -389,6 +403,8 @@ class Plan:
     title: str
     message: str
     body: str
+    edits: list[Edit] = field(default_factory=list)
+    settled: list[tuple[str, str]] = field(default_factory=list)   # (повтор, основной): уже стоит в карточке
 
 
 def plural(n: int, one: str, few: str, many: str) -> str:
@@ -422,14 +438,20 @@ def date_be(value: str) -> str:
     return dt.strftime("%d.%m.%Y") if dt else md_cell(value)
 
 
-def make_body(entries: list[Entry], skipped, base: str, when: datetime) -> str:
+def edits_word(n: int) -> str:
+    return f"крыніцы да {n} {plural(n, 'апублікаванай карткі', 'апублікаваных картак', 'апублікаваных картак')}"
+
+
+def make_body(entries: list[Entry], skipped, base: str, when: datetime, edits: list[Edit] = ()) -> str:
     if base == "main":
         merge = "**Merge — гэта публікацыя:** што трапіла ў `main`, тое на сайце."
     else:
         merge = (f"**Merge у `{base}` — не прод:** карткі трапяць толькі ў прэв'ю Vercel "
                  f"гэтай галіны. У `main` гэты PR не зьліваць.")
+    head = (f"Карткі ШІ-навін на праверку — {cards_word(len(entries))}." if entries or not edits
+            else "Новых картак няма — толькі крыніцы да апублікаваных.")
     out = [
-        f"Карткі ШІ-навін на праверку — {cards_word(len(entries))}. {merge}",
+        f"{head} {merge}",
         "",
         "- **Чытаць** — укладка «Files changed»: адна картка — адзін файл "
         f"`{CONTENT_DIR}/<id>.json`. Зьверху файла загаловак, тэзіс, кароткі зьмест "
@@ -449,6 +471,13 @@ def make_body(entries: list[Entry], skipped, base: str, when: datetime) -> str:
         out.append(f"{i}. **{md_cell(e.site['be_title'])}** · {notes} · "
                    f"[{md_cell(src['source'])}]({src['url']}) · {date_be(e.site['published_at'])} · "
                    f"`{e.card['id'][:12]}`")
+    if edits:
+        out += ["", f"### Крыніцы да апублікаваных — {len(edits)}", "",
+                "Тая ж падзея ў іншай крыніцы: у файле апублікаванай карткі дададзена спасылка "
+                "ў «Крыніцы», больш нічога не мяняецца. Лішняя — выдаліць яе з `sources` у дыфе.", ""]
+        for e in edits:
+            links = ", ".join(f"[{md_cell(s['source'])}]({s['url']})" for s in e.added)
+            out.append(f"- **{md_cell(e.site['be_title'])}** · `{e.id[:12]}` — + {links}")
     if skipped:
         out += ["", f"### Не ўвайшлі — {len(skipped)}", "",
                 "Гэтых картак у PR няма: такую памылку не выправіць праўкай слова ў дыфе.", ""]
@@ -464,13 +493,21 @@ def make_body(entries: list[Entry], skipped, base: str, when: datetime) -> str:
     return body
 
 
-def plan_pr(cards: list[dict], broken: list, done: set[str], base: str, when: datetime) -> Plan:
+def plan_pr(cards: list[dict], broken: list, done: set[str], base: str, when: datetime,
+            dups: dict | None = None, edits: list[Edit] = (), settled=()) -> Plan:
     """Всё, что уйдёт в PR, без сети: файлы, комментарии, тело. done — уже
-    предложенные или уже лежащие на сайте id, они пропускаются молча."""
+    предложенные или уже лежащие на сайте id, они пропускаются молча.
+    dups — повторы из состояния (duplicate_sources): дописываются в «Крыніцы»
+    новых карточек. edits и settled — правки опубликованных (link_edits)."""
     entries, skipped = [], list(broken)
+    dups = dups or {}
     for c in cards:
         if c.get("id") in done:
             continue
+        # Повтор, пришедший после черновика (склейка или triage), — в «Крыніцы»
+        linked = dups.get(c.get("id"), [])
+        if linked and isinstance(c.get("sources"), list):
+            c = {**c, "sources": add_sources(c["sources"], [s for _, s in linked])}
         c, en_notes = without_english(c)
         fatal, extra = check(c)
         if fatal:
@@ -480,20 +517,98 @@ def plan_pr(cards: list[dict], broken: list, done: set[str], base: str, when: da
         path = card_path(c["id"])
         text = render(sc)
         notes = list(c.get("review_notes") or []) + en_notes + extra + content_notes(c)
-        e = Entry(c, sc, path, text, notes)
+        e = Entry(c, sc, path, text, notes, linked=[h for h, _ in linked])
         e.comments = comments_for(path, sc, text, notes)
         entries.append(e)
     entries.sort(key=lambda e: e.path)       # как GitHub показывает файлы в «Files changed»
     stamp = when.strftime("%Y-%m-%d-%H%M")
     n = len(entries)
+    what = ", ".join(([f"{cards_word(n)} на праверку"] if n or not edits else [])
+                     + ([edits_word(len(edits))] if edits else []))
     return Plan(
         entries=entries,
         skipped=skipped,
         branch=f"{BRANCH_PREFIX}{stamp}",
-        title=f"ШІ-навіны: {cards_word(n)} на праверку, {when.strftime('%d.%m.%Y')}",
-        message=f"навіны: {cards_word(n)} на праверку",
-        body=make_body(entries, skipped, base, when),
+        title=f"ШІ-навіны: {what}, {when.strftime('%d.%m.%Y')}",
+        message=f"навіны: {what}",
+        body=make_body(entries, skipped, base, when, list(edits)),
+        edits=sorted(edits, key=lambda e: e.path),
+        settled=list(settled),
     )
+
+
+# ---------- повторы: ссылка в «Крыніцы» ----------
+# Повтор события (склейка коллектора или triage, этап 11, ai-news-plan.md
+# сайта; рашэнне аўтара 08.10.2026) своей карточки не получает — он ссылка
+# в «Крыніцы» карточки основного. Карточки ещё нет на сайте — повтор
+# дописывается в неё перед PR (plan_pr); уже опубликованная правится тем же
+# PR: в её файл добавляется источник, больше ничего (link_edits). Что уже
+# стоит на сайте, помнит таблица linked.
+
+# Повтор приходит в пределах суток-двух после основного (окно склейки 72 часа,
+# triage — в каждом прогоне), старше не смотрим: повторы основных, отсеянных
+# triage, так и остаются без пары и копились бы в каждом запуске
+LINK_LOOKBACK_DAYS = 14
+
+
+def duplicate_sources(db: sqlite3.Connection, now: datetime) -> dict[str, list[tuple[str, dict]]]:
+    """Основной → [(hash повтора, источник для «Крыніц»)] — повторы, которых ещё нет в linked."""
+    since = collect.iso(now - timedelta(days=LINK_LOOKBACK_DAYS))
+    out: dict[str, list[tuple[str, dict]]] = {}
+    for h, primary, source, url, title in db.execute(
+            "SELECT hash, primary_hash, source, url, COALESCE(title, '') FROM seen WHERE status = 'duplicate'"
+            " AND primary_hash IS NOT NULL AND first_seen_at >= ? AND hash NOT IN (SELECT hash FROM linked)"
+            " ORDER BY published_at, hash", (since,)):
+        out.setdefault(primary, []).append((h, {"source": source, "url": url, "title": title, "primary": False}))
+    return out
+
+
+def add_sources(sources: list[dict], extra: list[dict]) -> list[dict]:
+    """Источники карточки плюс те из extra, которых в ней ещё нет — по url_key:
+    ссылка без меток и схемы, как коллектор сверяет виденное."""
+    have = {collect.url_key(s["url"]) for s in sources if isinstance(s, dict) and s.get("url")}
+    out = list(sources)
+    for s in extra:
+        if collect.url_key(s["url"]) not in have:
+            out.append(s)
+            have.add(collect.url_key(s["url"]))
+    return out
+
+
+def link_edits(gh: "GitHub", base: str, dups: dict, site_ids: set[str],
+               cards_dir: Path) -> tuple[list[Edit], list[tuple[str, str]]]:
+    """Правки опубликованных карточек под повторы, которых в них ещё нет.
+    Возвращает (правки, [(повтор, основной)] — уже стоят в карточке: их тоже
+    в linked, чтобы не смотреть снова). Сначала сверка с черновиком в cards_dir —
+    повторы склейки обычно вошли в карточку ещё при генерации, и за файлом
+    на сайт ходить не надо."""
+    edits, settled = [], []
+    for primary, items in dups.items():
+        if primary not in site_ids:
+            continue            # карточки на сайте ещё нет — повтор войдёт в неё при публикации
+        draft = cards_dir / f"{primary}.json"
+        if draft.exists():
+            try:
+                have = {collect.url_key(s["url"]) for s in json.loads(draft.read_text(encoding="utf-8"))["sources"]}
+            except (ValueError, KeyError, TypeError):
+                have = set()
+            settled += [(h, primary) for h, s in items if collect.url_key(s["url"]) in have]
+            items = [(h, s) for h, s in items if collect.url_key(s["url"]) not in have]
+        if not items:
+            continue
+        path = card_path(primary)
+        text = gh.file_text(path, base)
+        if text is None:
+            continue            # файл удалили между запросами — посмотрим в следующий раз
+        sc = json.loads(text)
+        new = add_sources(sc["sources"], [s for _, s in items])
+        added = new[len(sc["sources"]):]
+        if not added:
+            settled += [(h, primary) for h, _ in items]
+            continue
+        sc["sources"] = new
+        edits.append(Edit(primary, sc, path, render(sc), added, [h for h, _ in items]))
+    return edits, settled
 
 
 def notes_markdown(plan: Plan) -> str:
@@ -561,6 +676,12 @@ class GitHub:
         return {t["path"][:-5] for t in self.call("GET", f"/git/trees/{tree}")["tree"]
                 if t["path"].endswith(".json")}
 
+    def file_text(self, path: str, ref: str) -> str | None:
+        """Текст файла в ветке ref; файла нет — None. Contents API для одного
+        файла: предел в 1000 — только у списка папки."""
+        got = self.call("GET", f"/contents/{path}?ref={ref}", missing_ok=True)
+        return None if got is None else base64.b64decode(got["content"]).decode("utf-8")
+
     def open_pr(self, plan: Plan, base: str) -> tuple[int, str, str]:
         if not plan.branch.startswith(BRANCH_PREFIX):
             raise GitHubError(f"бот пишет только в ветки {BRANCH_PREFIX}*")
@@ -568,7 +689,8 @@ class GitHub:
         base_tree = self.call("GET", f"/git/commits/{parent}")["tree"]["sha"]
         tree = self.call("POST", "/git/trees", {
             "base_tree": base_tree,
-            "tree": [{"path": e.path, "mode": "100644", "type": "blob", "content": e.text} for e in plan.entries],
+            "tree": [{"path": e.path, "mode": "100644", "type": "blob", "content": e.text}
+                     for e in [*plan.entries, *plan.edits]],
         })["sha"]
         commit = self.call("POST", "/git/commits", {"message": plan.message, "tree": tree, "parents": [parent]})["sha"]
         # POST, не PATCH: создаётся новая ветка; существующую GitHub не даст перезаписать (422)
@@ -611,6 +733,18 @@ def record(db: sqlite3.Connection, plan: Plan, number: int | None):
         if ID_RE.match(cid):
             db.execute("INSERT OR REPLACE INTO publication VALUES (?, 'skipped', ?, ?, ?, ?)",
                        (cid, number, plan.branch, "; ".join(reasons)[:500], now))
+    for primary, hashes in [(e.card["id"], e.linked) for e in plan.entries] + [(e.id, e.linked) for e in plan.edits]:
+        db.executemany("INSERT OR REPLACE INTO linked VALUES (?, ?, ?, ?)",
+                       [(h, primary, number, now) for h in hashes])
+    record_settled(db, plan)
+    db.commit()
+
+
+def record_settled(db: sqlite3.Connection, plan: Plan):
+    """Повторы, которые уже стояли в карточке: PR для них не нужен."""
+    now = collect.iso(datetime.now(timezone.utc))
+    db.executemany("INSERT OR REPLACE INTO linked VALUES (?, ?, NULL, ?)",
+                   [(h, primary, now) for h, primary in plan.settled])
     db.commit()
 
 
@@ -688,17 +822,22 @@ def main():
     gh = GitHub(os.environ.get(REPO_ENV) or DEFAULT_REPO, token)
     db = collect.open_state(Path(args.state))
 
-    done = done_ids(db) | gh.published_ids(args.base)
-    plan = plan_pr(cards, broken, done, args.base, when)
+    site_ids = gh.published_ids(args.base)
+    done = done_ids(db) | site_ids
+    dups = duplicate_sources(db, when)
+    edits, settled = link_edits(gh, args.base, dups, site_ids, Path(args.cards))
+    plan = plan_pr(cards, broken, done, args.base, when, dups, edits, settled)
     report_skipped(plan)
-    if not plan.entries:
-        log.info("Новых карточек нет — PR не открываю")
+    if not plan.entries and not plan.edits:
+        record_settled(db, plan)
+        log.info("Новых карточек и источников нет — PR не открываю")
         return
     try:
         number, url, ok = publish(plan, gh, db, args.base, merge=args.merge)
     except GitHubError as e:
         sys.exit(f"PR открыт, но не влит: {e}. Карточки в состоянии — второй раз не уйдут, влить PR вручную")
-    log.info("PR #%d: %s — %s%s", number, url, cards_word(len(plan.entries)), ", влит" if args.merge else "")
+    log.info("PR #%d: %s — %s%s%s", number, url, cards_word(len(plan.entries)),
+             f", {edits_word(len(plan.edits))}" if plan.edits else "", ", влит" if args.merge else "")
     if not ok:
         sys.exit(1)
 

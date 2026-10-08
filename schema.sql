@@ -80,3 +80,13 @@ CREATE TABLE IF NOT EXISTS publication (
     reason       TEXT,
     at           TEXT NOT NULL
 );
+
+-- Повторы (seen.status = 'duplicate'), которые уже стоят в «Крыніцах» карточки
+-- основного на сайте (publish.py, этап 11): вошли в карточку при её публикации,
+-- дописаны правкой опубликованной или уже были в ней. Второй раз не дописываются.
+CREATE TABLE IF NOT EXISTS linked (
+    hash          TEXT PRIMARY KEY,
+    primary_hash  TEXT NOT NULL,
+    pr            INTEGER,            -- PR, которым дописан или опубликован; NULL — уже стоял в карточке
+    at            TEXT NOT NULL
+);

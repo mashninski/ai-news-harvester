@@ -458,28 +458,129 @@ def tokens_note(acc: dict) -> str:
 
 # ---------- triage ----------
 
+# Дубль по смыслу решает triage, а не слова заголовков (этап 11, ai-news-plan.md
+# сайта; рашэнне аўтара 08.10.2026): склейка коллектора одно событие в разных
+# словах не ловит, а материалы одного источника не сравнивает вовсе — две
+# карточки 02.10 про указ Трампа были подкастом и видео одного TechCrunch.
+# Haiku и так читает каждый материал, ему добавляется список «что уже есть»:
+# отобранное triage раньше — и дальше по пайплайну, опубликованное тоже
+LISTED_STAGES = ("triaged", "generate_sent", "linted", "fix_sent", "draft")
+# Список — в окне склейки от даты материала, ближние по времени первыми. При
+# ~20 карточках в сутки в окно 72 часа входит ~60; потолок — от наплыва
+TRIAGE_KNOWN_MAX = 100
+
+
+def item_dates(db, hashes) -> dict[str, str]:
+    marks = ",".join("?" * len(hashes))
+    return dict(db.execute(f"SELECT hash, COALESCE(published_at, first_seen_at) FROM seen"
+                           f" WHERE hash IN ({marks})", list(hashes)).fetchall())
+
+
+def triage_known(db, hashes: list[str]) -> dict[str, list[str]]:
+    """Для каждого материала пакета — hash'и «что уже есть»: отобранное раньше
+    (LISTED_STAGES) и материалы этого же пакета, вышедшие раньше него. Только
+    раньше: иначе два материала пакета могли бы назвать дублем друг друга,
+    и карточки не вышло бы ни у одного."""
+    if not hashes:
+        return {}
+    window = timedelta(hours=collect.CLUSTER_WINDOW_HOURS)
+    own = sorted((d, h) for h, d in item_dates(db, hashes).items())
+    lo = collect.iso(collect.parse_iso(own[0][0]) - window)
+    marks = ",".join("?" * len(LISTED_STAGES))
+    # Источник только для повторов сам основным не бывает: отобранное из него
+    # до правила снимает submit_generate, и дубль на него остался бы без карточки
+    secondary = ",".join("?" * len(collect.SECONDARY_ONLY))
+    listed = db.execute(f"SELECT COALESCE(s.published_at, s.first_seen_at), s.hash FROM item i"
+                        f" JOIN seen s ON s.hash = i.hash WHERE i.stage IN ({marks}) AND s.status = 'new'"
+                        f" AND s.source NOT IN ({secondary}) AND COALESCE(s.published_at, s.first_seen_at) >= ?",
+                        (*LISTED_STAGES, *collect.SECONDARY_ONLY, lo)).fetchall()
+    out = {}
+    for k, (d, h) in enumerate(own):
+        at = collect.parse_iso(d)
+        near = sorted((abs(collect.parse_iso(d2) - at), h2) for d2, h2 in [*listed, *own[:k]]
+                      if abs(collect.parse_iso(d2) - at) <= window)
+        out[h] = [h2 for _, h2 in near[:TRIAGE_KNOWN_MAX]]
+    return out
+
+
 def submit_triage(db, client) -> str | None:
     hashes = [h for (h,) in db.execute("SELECT hash FROM item WHERE stage = 'new'").fetchall()]
+    known = triage_known(db, hashes)
     reqs = []
     for h in hashes:
         m = material(db, h)
+        listed = [db.execute("SELECT source, COALESCE(title, '') FROM seen WHERE hash = ?", (k,)).fetchone()
+                  for k in known[h]]
         reqs.append({"custom_id": custom_id("triage", h), "params": {
             "model": llm.TRIAGE_MODEL,
             "max_tokens": MAX_TOKENS["triage"],
             "system": prompts.TRIAGE_SYSTEM,
-            "messages": [{"role": "user", "content": prompts.triage_user(m["source"], m["title"], m["body"])}],
+            "messages": [{"role": "user", "content": prompts.triage_user(m["source"], m["title"], m["body"],
+                                                                         listed)}],
             "output_config": {"format": {"type": "json_schema", "schema": prompts.TRIAGE_SCHEMA}},
         }})
+        # Номер в ответе (same_as) — позиция в этом списке; ответ придёт в другом запуске
+        db.execute("UPDATE item SET payload = ? WHERE hash = ?", (json.dumps({"triage_known": known[h]}), h))
     return submit(db, client, "triage", reqs, hashes, "triage_sent")
 
 
+def primary_of(db, h: str, decided: dict[str, str | None], depth: int = 0) -> str | None:
+    """Куда ведёт дубль на h: сам h, если он отобран, его основной, если он
+    сам повтор, или None — h отсеян или ещё не разобран. decided — исход
+    материалов этого пакета: они разбираются по порядку выхода, раньше —
+    первыми, так что исход того, на кого можно сослаться, уже известен."""
+    if h in decided:
+        return decided[h]
+    row = db.execute("SELECT s.status, s.primary_hash, i.stage FROM seen s LEFT JOIN item i ON i.hash = s.hash"
+                     " WHERE s.hash = ?", (h,)).fetchone()
+    if not row:
+        return None
+    status, primary, stage = row
+    if status == "duplicate":
+        return primary_of(db, primary, decided, depth + 1) if primary and depth < 3 else None
+    return h if stage in LISTED_STAGES else None
+
+
+def same_event(db, data: dict, known: list[str], decided: dict) -> str | None:
+    """Основной, повтором которого triage счёл материал. Тот же пересказ —
+    повтор; новые факты или разбор (adds_new) — своя карточка."""
+    n = data.get("same_as") or 0
+    if not n or data.get("adds_new"):
+        return None
+    if not 1 <= n <= len(known):
+        log.warning("triage: same_as = %s, а ў спісе %d", n, len(known))
+        return None
+    return primary_of(db, known[n - 1], decided)
+
+
+def mark_duplicate(db, h: str, primary: str, fields: dict):
+    """Повтор события: как повтор склейки коллектора — в seen duplicate
+    с primary_hash, своей карточки нет; на сайте он — ссылка в «Крыніцы»
+    основного (publish.duplicate_sources). Его повторы склейки переходят
+    к основному. Текст остаётся, только если основной ещё ждёт генерации:
+    тогда он уйдёт в неё вторым источником (prompts.generate_user)."""
+    if db.execute("SELECT stage FROM item WHERE hash = ?", (primary,)).fetchone()[0] != "triaged":
+        forget_body(db, h)
+    db.execute("UPDATE seen SET status = 'duplicate', primary_hash = ? WHERE hash = ?", (primary, h))
+    db.execute("UPDATE seen SET primary_hash = ? WHERE primary_hash = ?", (primary, h))
+    set_stage(db, h, "rejected", **fields, error=f"паўтор {primary}")
+    (s1, t1), (s2, t2) = (db.execute("SELECT source, COALESCE(title, '') FROM seen WHERE hash = ?", (x,)).fetchone()
+                          for x in (h, primary))
+    announce(f"Паўтор па сэнсе: {h[:8]} {s1} «{t1}» → {primary[:8]} {s2} «{t2}»")
+
+
 def on_triage(db, res, results, acc):
-    for r in results:
+    dates = item_dates(db, [r.custom_id.split("-", 1)[1] for r in results]) if results else {}
+    decided: dict[str, str | None] = {}      # материал пакета → сам (отобран), основной (повтор), None
+    for r in sorted(results, key=lambda r: (dates.get(r.custom_id.split("-", 1)[1], ""), r.custom_id)):
         h = r.custom_id.split("-", 1)[1]
+        decided[h] = None
         data, err, _ = result_json(r)
         if err:
             fail_step(db, h, "new", err)
             continue
+        known = json.loads(db.execute("SELECT payload FROM item WHERE hash = ?", (h,)).fetchone()[0]
+                           or "{}").get("triage_known", [])
         importance = data["importance"] if data["is_ai"] else 1
         fields = dict(category=data["category"], vendor=data["vendor"], importance=importance,
                       reason=data["reason"], payload=json.dumps({"vendor_name": data["vendor_name"]},
@@ -487,8 +588,12 @@ def on_triage(db, res, results, acc):
         if importance <= 1:
             set_stage(db, h, "rejected", **fields)
             forget_body(db, h)
+        elif primary := same_event(db, data, known, decided):
+            mark_duplicate(db, h, primary, fields)
+            decided[h] = primary
         else:
             set_stage(db, h, "triaged", **fields)
+            decided[h] = h
 
 
 # ---------- генерация ----------
@@ -750,8 +855,12 @@ def apply_fixes(res: Resources, p: dict, fixes: list[dict]) -> dict:
         for n in res.suspicious(by_n[fl["n"]]["sentence"], conv):
             p["notes"].append({"kind": "канвертар", "detail": f"{fl['field']} (fix): «{n['before']}» → «{n['after']}»"})
     for f in FIELDS:
-        p["nk"][f] = lint.join_paragraphs(nk[f])
-        p["tk"][f] = lint.join_paragraphs(tk[f])
+        # Вычеркнутое fix'ом предложение пустое (prompts.FIX_TASK, «спасылка на
+        # крыніцу»). Поле, где не осталось ничего, — как было: пустой тезис
+        # не пустил бы карточку в PR, а остаток линтера виден на ревью
+        if lint.join_paragraphs(tk[f]).strip():
+            p["nk"][f] = lint.join_paragraphs(nk[f])
+            p["tk"][f] = lint.join_paragraphs(tk[f])
     # Что осталось после fix: либо модель сочла срабатывание ложным, либо не справилась
     p["fix_log"] = [{"field": fl["field"], "before": fl["sentence"],
                      "changed": bool(fl.get("n") in by_n and by_n[fl["n"]]["changed"]),
