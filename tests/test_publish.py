@@ -164,6 +164,17 @@ def test_length_norm_comes_from_prompt():
     assert notes_of(card(retelling=dashes.strip()), "retelling: ") == [f"retelling: {hi + 5} слоў — норма {lo}–{hi}"]
 
 
+def test_length_rule_caps_long_and_does_not_pad_short():
+    # Этап 12: длиннее нормы — от длинного источника, короче — от короткого;
+    # верх жёстко, короткий пересказ не добирать (ai-news-plan.md сайта)
+    lo, hi = publish.prompts.RETELLING_WORDS
+    for task in (publish.prompts.GENERATE_TASK, publish.prompts.GENERATE_TASK_TARASK):
+        assert publish.prompts.LENGTH in task
+    assert f"{hi} — мяжа" in publish.prompts.LENGTH
+    assert f"менш за {lo} слоў можна, дабіраць не трэба" in publish.prompts.LENGTH
+    assert f"{hi} words is a cap" in publish.prompts.EN_TASK and "do not pad" in publish.prompts.EN_TASK
+
+
 def test_content_notes_go_to_pr_comments_not_into_check():
     c = pr1_cards()["d02470a"]
     full = card(5, **c)

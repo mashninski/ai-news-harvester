@@ -328,6 +328,21 @@ SOURCE_SILENCE = """Агаворкі — толькі тыя, што робіц�
 # (publish.content_notes): правится здесь — меняется и то и другое
 RETELLING_WORDS = (120, 220)
 
+# Длина пересказа (этап 12, ai-news-plan.md сайта). PR бота №3–9: вне нормы
+# 45 карточек из 92, и зависит это от длины источника. Длиннее 220 — MIT TR
+# (8 из 11), докачанные страницы (5 из 9), длинные посты Уилисона: модель
+# пересказывает всё, что ей дали. Короче 120 — TechCrunch (17 из 28, в фиде
+# анонс; с 08.10.2026 он только повтор), короткие посты OpenAI, Ars, Уилисона.
+# Короткие добирались абзацем «у крыніцы не…» (снят этапом 11, после чистки
+# 08.10.2026 ещё 10 карточек стали короче 120). Поэтому верх — жёстко,
+# низ — не добирать: из короткого источника добор — вода или выдумка
+LENGTH = f"""Даўжыня пераказу — {RETELLING_WORDS[0]}–{RETELLING_WORDS[1]} слоў, і {RETELLING_WORDS[1]} — мяжа, \
+а не арыенцір. Доўгая крыніца (аналітыка, інтэрв'ю, доўгі пост, старонка цалкам) — не прычына \
+для доўгага пераказу: выбірай галоўнае, другараднае прапускай. Пасля чарнавіка палічы словы; \
+больш за {RETELLING_WORDS[1]} — скарачай: спачатку паўторы і прыклады, потым другарадныя дэталі. \
+Кароткая крыніца — кароткі пераказ: менш за {RETELLING_WORDS[0]} слоў можна, дабіраць не трэба — \
+ні паўторамі, ні агульнымі словамі, ні тым, чаго ў крыніцы няма."""
+
 
 def _generate_task(tarask: bool) -> str:
     # При тарашкевіцы модели объясняется, почему не писать ею сразу; при наркамаўке
@@ -365,6 +380,8 @@ def _generate_task(tarask: bool) -> str:
 - retelling — пераказ для акна з поўным тэкстам: 3–5 абзацаў, разам {RETELLING_WORDS[0]}–{RETELLING_WORDS[1]} слоў, \
 абзацы праз пусты радок. Першы абзац пачынаецца з факта, якога няма ў тэзісе. \
 Далей — кантэкст.
+
+{LENGTH}
 
 {SOURCE_SILENCE}
 
@@ -528,7 +545,10 @@ Fields:
 - en_thesis — one sentence ending with a period: the key detail that is not in the title.
 - en_retelling — 3–5 paragraphs, {RETELLING_WORDS[0]}–{RETELLING_WORDS[1]} words in \
 total, paragraphs separated by a blank line. First — the details of what happened \
-and who; then context.
+and who; then context. {RETELLING_WORDS[1]} words is a cap, not a target: a long source \
+(analysis, interview, long post, full page) is no reason for a long retelling — keep \
+the main points, drop the secondary ones. A short source gives a shorter retelling: \
+fewer than {RETELLING_WORDS[0]} words is fine, do not pad.
 
 Caveats only where the source itself makes them ("the company warns that…"). \
 Do not write what the source does not say or what is missing from it — no \
