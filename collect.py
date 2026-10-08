@@ -294,18 +294,27 @@ def parse_article(html: bytes, max_paragraphs: int = BODY_PARAGRAPHS) -> tuple[s
             dt = datetime.strptime(f"{m[1]} {m[2]} {m[3]}", "%b %d %Y").replace(tzinfo=timezone.utc)
             published = iso(dt)
 
-    # Абзацы из <article>, иначе из <main>. Абзац-«шапка» с навигацией у Anthropic
-    # тоже <p> внутри article — отсекаем короткие и те, где нет точки
-    scope = soup.find("article") or soup.find("main") or soup
-    paras = []
-    for p in scope.find_all("p"):
-        text = re.sub(r"\s+", " ", p.get_text(" ", strip=True))
-        # Подпись внешней ссылки у OpenAI — служебная, в пересказ не нужна
-        text = LINK_HINT_RE.sub("", text)
-        if len(text) >= 60 and "." in text:
-            paras.append(text)
-        if len(paras) >= max_paragraphs:
-            break
+    # Абзацы — из того <article> или <main>, где больше всего текста статьи.
+    # Не «первый <article>»: у Hugging Face (замечено 08.10.2026) на странице
+    # до восьми <article> — карточки других постов, пустые или с абзацем
+    # описания, а сам пост лежит в <main> без article; первый попавшийся давал
+    # пустой текст и «мала тэксту». Абзац-«шапка» с навигацией у Anthropic
+    # тоже <p> внутри article — короткие и без точки отсекаются
+    def paragraphs_of(node) -> list[str]:
+        out = []
+        for p in node.find_all("p"):
+            # Текст из <main> — без абзацев карточек других постов внутри него
+            if node.name != "article" and p.find_parent("article"):
+                continue
+            text = re.sub(r"\s+", " ", p.get_text(" ", strip=True))
+            # Подпись внешней ссылки у OpenAI — служебная, в пересказ не нужна
+            text = LINK_HINT_RE.sub("", text)
+            if len(text) >= 60 and "." in text:
+                out.append(text)
+        return out
+
+    candidates = soup.find_all("article") + [n for n in (soup.find("main"),) if n] or [soup]
+    paras = max((paragraphs_of(n) for n in candidates), key=lambda ps: sum(map(len, ps)))[:max_paragraphs]
     return title, "\n\n".join(paras), published
 
 
