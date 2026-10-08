@@ -68,11 +68,15 @@ env:
   # автора 02.10.2026 (журнал сайта); вернуть — переменная AI_NEWS_ORTHOGRAPHY = tarask
   AI_NEWS_ORTHOGRAPHY: ${{ vars.AI_NEWS_ORTHOGRAPHY || 'narkamauka' }}
 
+# Раннер — ubuntu-24.04, а не ubuntu-latest: метка latest с 19.10.2026 переезжает
+# на Ubuntu 26, и прогон сменил бы систему сам, без коммита. Actions — мажорные
+# версии на Node 24 (Node 20 у actions устарел). Этап 12, журнал сайта, 09.10.2026;
+# сверяет test_workflow_pins_runner_and_node24_actions
 jobs:
   # Какой это прогон и не запущен ли он уже Worker'ом. Отдельной задачей
   # и без concurrency: запасной прогон не встаёт в очередь за идущим
   plan:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
       actions: read
@@ -122,7 +126,7 @@ jobs:
   harvest:
     needs: plan
     if: ${{ needs.plan.outputs.skip != 'true' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     # Два прогона одновременно прочитали бы одно состояние, и сохранился бы
     # только последний: отправленный первым батч потерялся бы вместе с оплатой
@@ -135,9 +139,9 @@ jobs:
       FIX: ${{ needs.plan.outputs.kind == 'fix' }}
       PUBLISH: ${{ needs.plan.outputs.kind == 'publish' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
           cache: pip
@@ -146,7 +150,7 @@ jobs:
 
       - name: Состояние — из кэша
         id: restore
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: |
             data/state.sqlite*
@@ -196,7 +200,7 @@ jobs:
       # токеном публикации (у него Contents: read), в этот репозиторий не копируются
       - name: Языковые ресурсы сайта
         if: ${{ !cancelled() && env.PIPELINE == 'on' && steps.guard.outcome == 'success' }}
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: mashninski/mashninski-site
           ref: ${{ env.SITE_BRANCH }}
@@ -205,7 +209,7 @@ jobs:
           sparse-checkout: claude
           persist-credentials: false
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         if: ${{ !cancelled() && env.PIPELINE == 'on' && steps.guard.outcome == 'success' && env.AI_NEWS_ORTHOGRAPHY == 'tarask' }}
         with:
           node-version: "22"
@@ -256,7 +260,7 @@ jobs:
       # проваленной проверки состояния: пустой файл затёр бы настоящий кэш
       - name: Состояние — в кэш
         if: ${{ always() && steps.guard.outcome == 'success' && hashFiles('data/state.sqlite') != '' }}
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v6
         with:
           path: |
             data/state.sqlite*

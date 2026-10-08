@@ -913,6 +913,22 @@ def test_workflow_backup_schedule_skips_what_worker_ran():
     assert '- cron: "17 ' not in text
 
 
+# Мажорные версии actions на Node 24 — по релизам на GitHub, сверено 09.10.2026
+NODE24_MAJOR = {"actions/checkout": 5, "actions/setup-python": 6, "actions/cache": 5, "actions/setup-node": 5}
+
+
+def test_workflow_pins_runner_and_node24_actions():
+    # Этап 12: ubuntu-latest с 19.10.2026 переезжает на Ubuntu 26, Node 20 у actions устарел
+    yaml = pytest.importorskip("yaml")
+    text = WORKFLOW.read_text(encoding="utf-8")
+    wf = yaml.safe_load(text)
+    assert {j["runs-on"] for j in wf["jobs"].values()} == {"ubuntu-24.04"}
+    used = re.findall(r"uses: (actions/[\w-]+)(?:/[\w-]+)?@v(\d+)", text)
+    assert {a for a, _ in used} == set(NODE24_MAJOR)
+    for action, major in used:
+        assert int(major) >= NODE24_MAJOR[action], (action, major)
+
+
 def test_only_final_failure_is_an_actions_annotation(tmp_path, site, monkeypatch, capsys):
     # Повторная попытка — шум, аннотация только на снятый материал
     monkeypatch.setattr(pipeline, "CARDS_DIR", tmp_path / "cards")
