@@ -726,6 +726,21 @@ def test_generate_prompt_asks_each_layer_to_add_something_new():
         assert '"' not in prompts.LAYERS                           # прямая кавычка обрывает поле ответа
 
 
+def test_layers_first_paragraph_starts_with_a_new_fact():
+    # Этап 12 (рашэнне аўтара 09.10.2026): первый абзац повторял тезис в половине
+    # карточек PR №3–9 — правило сказано прямо, с примером из настоящей карточки
+    for task in (prompts.GENERATE_TASK, prompts.GENERATE_TASK_TARASK):
+        assert "тэзіс стаіць адразу над пераказам" in task
+        assert "першы абзац пачынаецца з факта, якога ў тэзісе няма" in task
+        assert "не называе галоўны факт тэзіса нанова" in task
+        assert "Першы абзац — падрабязнасці таго, што здарылася і хто" not in task
+    # Пример «дрэнна / добра» — карточка замера 9547f4d1: тезис во втором предложении слово в слово
+    bad, good = prompts.LAYERS.split("Дрэнна (першы абзац паўтарае загаловак і тэзіс)")[1].split("Добра: той жа тэзіс")
+    assert bad.count("Дакумент акрэслівае тры напрамкі") == 2
+    assert "Дакумент акрэслівае" not in good and "safety case" in good
+    assert "the thesis sits right above it" in prompts.EN_TASK
+
+
 # ---------- генерация и fix: по батчу за цикл, два цикла в сутки ----------
 # Журнал сайта, 07.10.2026, «Этап 9» (до того — раз в сутки, «Этап 8г»):
 # справочный блок кэшируется на час, прогоны — раз в 2 часа, поэтому генерация
