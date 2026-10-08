@@ -571,6 +571,12 @@ def submit_generate(db, client, res: Resources, limit: int = MAX_GENERATE_PER_RU
     reqs, hashes = [], []
     for (h,) in rows:
         m = material(db, h)
+        # Источник только для повторов (collect.SECONDARY_ONLY) своей карточки
+        # не получает; так снимаются и материалы, отобранные до этого правила
+        if m["source"] in collect.SECONDARY_ONLY:
+            set_stage(db, h, "rejected", error="крыніца толькі для паўтораў: у фідзе толькі анонс")
+            forget_body(db, h)
+            continue
         err = ensure_body(db, m)
         if err:
             fail_step(db, h, "triaged", err)

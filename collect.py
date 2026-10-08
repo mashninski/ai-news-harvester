@@ -56,7 +56,7 @@ SOURCES = [
     {"id": "deepmind",   "kind": "rss",     "url": "https://deepmind.google/blog/rss.xml"},
     {"id": "huggingface", "kind": "rss",    "url": "https://huggingface.co/blog/feed.xml"},
     {"id": "anthropic",  "kind": "sitemap", "url": "https://www.anthropic.com/sitemap.xml"},
-    {"id": "techcrunch", "kind": "rss",     "url": "https://techcrunch.com/category/artificial-intelligence/feed/"},
+    {"id": "techcrunch", "kind": "rss",     "url": "https://techcrunch.com/category/artificial-intelligence/feed/"},  # только повторы: SECONDARY_ONLY
     {"id": "venturebeat", "kind": "rss",    "url": "https://venturebeat.com/category/ai/feed/"},
     {"id": "mittr",      "kind": "rss",     "url": "https://www.technologyreview.com/topic/artificial-intelligence/feed"},
     {"id": "willison",   "kind": "rss",     "url": "https://simonwillison.net/atom/everything/"},
@@ -443,6 +443,18 @@ def same_story(a: Item, b: Item, series) -> bool:
     return len(shared) / min(len(ta), len(tb)) >= CLUSTER_MIN_OVERLAP
 
 
+# Источники только для повторов (рашэнне аўтара 08.10.2026, журнал сайта):
+# своей карточки из них не бывает, только ссылка рядом с той же новостью
+# другого источника. TechCrunch в фиде отдаёт лишь анонс в одно предложение
+# (description, 60–320 знаков), и карточки из него выходили пустыми; страницу
+# не качаем — robots.txt TechCrunch поимённо запрещает ИИ-ботов, в том числе
+# anthropic-ai, а текст уходит в Claude. Материал такого источника без пары
+# пишется повтором без основного (primary_hash NULL): в генерацию он не идёт
+# (пайплайн берёт status = 'new') и якорем склейки не становится (load_known),
+# поэтому пост компании, пришедший позже, получит свою карточку
+SECONDARY_ONLY = {"techcrunch"}
+
+
 def cluster(fresh: list[Item], known: list[Item] = ()) -> tuple[list[Item], list[tuple[Item, Item]]]:
     """Склеивает одну новость из разных источников.
 
@@ -456,25 +468,28 @@ def cluster(fresh: list[Item], known: list[Item] = ()) -> tuple[list[Item], list
 
     Каждый материал сравнивается только с основным материалом кластера, не со
     всеми его участниками: иначе A≈B и B≈C склеили бы разные A и C цепочкой.
-    Основным становится уже отданный, иначе — пост вендора, иначе — более ранний."""
+    Основным становится уже отданный, иначе — пост вендора, иначе — более ранний;
+    источник из SECONDARY_ONLY — только повтором: в очереди он последний,
+    а без пары остаётся в `orphans` третьим элементом ответа."""
     series = series_finder([*fresh, *known])
     fresh_hashes = {it.hash for it in fresh}
 
     def order(it: Item):
-        return (it.source not in VENDORS, it.published_at or "9999")
+        return (it.source in SECONDARY_ONLY, it.source not in VENDORS, it.published_at or "9999")
 
     primaries: list[Item] = list(known)
+    orphans: list[Item] = []
     for it in sorted(fresh, key=order):
         for p in primaries:
             if same_story(p, it, series) and all(d.source != it.source for d in p.duplicates):
                 p.duplicates.append(it)
                 break
         else:
-            primaries.append(it)
+            (orphans if it.source in SECONDARY_ONLY else primaries).append(it)
 
     new = [p for p in primaries if p.hash in fresh_hashes]
     late = [(d, p) for p in known for d in p.duplicates if d.hash in fresh_hashes]
-    return new, late
+    return new, late, orphans
 
 
 # ---------- состояние ----------
@@ -565,7 +580,7 @@ def collect(db: sqlite3.Connection, sources=SOURCES, now: datetime | None = None
 
     # Самый старый свежий материал может склеиться с отданным ещё на окно раньше
     known = load_known(db, cutoff - timedelta(hours=CLUSTER_WINDOW_HOURS))
-    primaries, late = cluster(fresh, known)
+    primaries, late, orphans = cluster(fresh, known)
 
     stamp = iso(now)
     rows = []
@@ -577,6 +592,8 @@ def collect(db: sqlite3.Connection, sources=SOURCES, now: datetime | None = None
              for d, p in late]
     rows += [(s.hash, s.url, s.source, s.title or None, s.published_at, stamp, "stale", None)
              for s in stale]
+    # Источник только для повторов без пары — повтор без основного (SECONDARY_ONLY)
+    rows += [(o.hash, o.url, o.source, o.title, o.published_at, stamp, "duplicate", None) for o in orphans]
     # Текст — основным материалам (пайплайн берёт из состояния status = 'new')
     # и их повторам из этого же прогона: текст первого повтора уходит в генерацию
     # вторым источником (prompts.generate_user, этап 8б). Только то, что пришло

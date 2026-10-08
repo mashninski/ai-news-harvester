@@ -16,6 +16,14 @@ import collect  # noqa: E402
 from collect import Item  # noqa: E402
 
 FIX = Path(__file__).resolve().parent / "fixtures"
+
+
+@pytest.fixture(autouse=True)
+def no_secondary_only(monkeypatch):
+    """Тесты здесь — про склейку и разбор фидов, на живых парах, где TechCrunch
+    бывает основным. Правило «TechCrunch только повтором» (SECONDARY_ONLY,
+    08.10.2026) проверяет tests/test_secondary_only.py."""
+    monkeypatch.setattr(collect, "SECONDARY_ONLY", set())
 NOW = datetime(2026, 9, 24, 20, 0, tzinfo=timezone.utc)
 
 OPENAI = {"id": "openai", "kind": "rss", "url": "https://feeds.test/openai.xml"}
@@ -267,7 +275,7 @@ def item(source, title, when, url=None):
 def test_cluster_same_story_from_vendor_and_portal():
     a = item("openai", "Introducing GPT-6 Sol and Luna", "2026-09-22T15:00:00Z")
     b = item("techcrunch", "OpenAI launches GPT-6 Sol and Luna, boasting lower cost", "2026-09-22T21:00:00Z")
-    new, late = collect.cluster([b, a])
+    new, late, _ = collect.cluster([b, a])
     assert [p.source for p in new] == ["openai"]
     assert new[0].duplicates == [b]
 
@@ -276,7 +284,7 @@ def test_cluster_does_not_glue_by_brand_and_verb():
     """«OpenAI анонсировала X» и «OpenAI анонсировала Y» — разные новости."""
     a = item("openai", "OpenAI announces partnership with Airbnb", "2026-09-23T10:00:00Z")
     b = item("techcrunch", "OpenAI announces new data center in Texas", "2026-09-23T12:00:00Z")
-    new, _ = collect.cluster([a, b])
+    new, _, _ = collect.cluster([a, b])
     assert len(new) == 2
 
 
@@ -286,14 +294,14 @@ def test_cluster_ignores_series_words():
     live = item("deepmind", "Introducing Gemini 3.8 Live with Live Avatar", "2026-09-24T16:20:00Z")
     tts = item("deepmind", "Gemini 3.8 text-to-speech says hello", "2026-09-23T15:25:00Z")
     sw = item("willison", "Gemini 3.8 TTS Playground", "2026-09-23T17:12:00Z")
-    new, _ = collect.cluster([live, tts, sw])
+    new, _, _ = collect.cluster([live, tts, sw])
     assert len(new) == 3
 
 
 def test_cluster_respects_time_window():
     a = item("openai", "Introducing GPT-6 Sol and Luna", "2026-09-10T15:00:00Z")
     b = item("techcrunch", "OpenAI launches GPT-6 Sol and Luna", "2026-09-22T21:00:00Z")
-    new, _ = collect.cluster([a, b])
+    new, _, _ = collect.cluster([a, b])
     assert len(new) == 2
 
 
@@ -303,7 +311,7 @@ def test_cluster_one_duplicate_per_source():
     a = item("openai", "Introducing GPT-6 Sol and Luna", "2026-09-22T15:00:00Z")
     a.duplicates.append(item("techcrunch", "OpenAI launches GPT-6 Sol and Luna", "2026-09-22T21:00:00Z"))
     c = item("techcrunch", "GPT-6 Sol and Luna hands-on", "2026-09-23T09:00:00Z")
-    new, late = collect.cluster([c], known=[a])
+    new, late, _ = collect.cluster([c], known=[a])
     assert new == [c] and late == []
 
 
@@ -313,7 +321,7 @@ def test_cluster_same_source_follow_up_is_separate():
     a = item("openai", "Introducing GPT-6 Sol and Luna", "2026-09-22T15:00:00Z")
     b = item("techcrunch", "OpenAI launches GPT-6 Sol and Luna", "2026-09-22T21:00:00Z")
     c = item("techcrunch", "GPT-6 Sol and Luna hands-on", "2026-09-23T09:00:00Z")
-    new, _ = collect.cluster([a, b, c])
+    new, _, _ = collect.cluster([a, b, c])
     assert len(new) == 3
 
 
