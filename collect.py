@@ -85,8 +85,11 @@ VENDORS = {"openai", "deepmind", "huggingface", "anthropic", "mistral"}
 
 MAX_AGE_DAYS = 7              # старше — пишем в состояние как виденное, дальше не отдаём
 
-# Sitemap Anthropic
-NEWS_PATH = re.compile(r"^/news/[^/]+$")   # /news/<slug>; сама лента /news сюда не входит
+# Sitemap Anthropic: статьи — /news/<slug>, /research/<slug>, /engineering/<slug>;
+# сами ленты (/news, /research) сюда не входят. /research и /engineering
+# добавлены 12.10.2026 решением автора (журнал сайта): до того исследования
+# Anthropic в ленту не попадали вовсе. /legal, /careers и прочее — не статьи
+NEWS_PATH = re.compile(r"^/(news|research|engineering)/[^/]+$")
 SITEMAP_MAX_DEPTH = 2         # sitemap index → вложенные sitemap, глубже не ходим
 PAGE_FETCH_LIMIT = 15         # страниц за прогон; не скачанные подождут следующего
 BODY_PARAGRAPHS = 12          # сколько абзацев статьи брать в body

@@ -235,7 +235,7 @@ def test_sitemap_index_mask_and_single_page_fetch(db, monkeypatch):
     res, net = run(db, monkeypatch, [ANTHROPIC])
 
     # Обошли index, скачали только одну страницу — свежую новость.
-    # /news (лента), /careers, /research/... и старая новость не качаются
+    # /news (лента), /careers, /legal/... и старая новость не качаются
     pages = [u for u in net.calls if not u.endswith(".xml")]
     assert pages == ["https://www.anthropic.com/news/claude-chat-and-cowork"]
 
@@ -245,6 +245,26 @@ def test_sitemap_index_mask_and_single_page_fetch(db, monkeypatch):
     assert it.body.startswith("Starting today")
     assert "ResearchPolicy" not in it.body and "Short line" not in it.body
     assert res.stale == 1
+
+
+def test_sitemap_takes_research_and_engineering_but_not_section_pages(db, monkeypatch):
+    """С 12.10.2026 (решение автора): статьи /research/<slug> и
+    /engineering/<slug> — такие же материалы, как /news/<slug>; ленты
+    разделов и /legal — нет."""
+    research = "https://www.anthropic.com/research/some-paper"
+    engineering = "https://www.anthropic.com/engineering/some-post"
+    extra = (f"<url><loc>{research}</loc><lastmod>2026-09-23T10:00:00.000Z</lastmod></url>"
+             f"<url><loc>{engineering}</loc><lastmod>2026-09-23T11:00:00.000Z</lastmod></url>"
+             "<url><loc>https://www.anthropic.com/research</loc><lastmod>2026-09-24T10:00:00.000Z</lastmod></url>"
+             "</urlset>").encode()
+    monkeypatch.setitem(ROUTES, research, "article.html")
+    monkeypatch.setitem(ROUTES, engineering, "article.html")
+    net = FakeNet(patch={"https://www.anthropic.com/sitemap-pages.xml":
+                         lambda d: d.replace(b"</urlset>", extra)})
+    _, net = run(db, monkeypatch, [ANTHROPIC], net)
+
+    pages = sorted(u for u in net.calls if not u.endswith(".xml"))
+    assert pages == [engineering, "https://www.anthropic.com/news/claude-chat-and-cowork", research]
 
 
 def test_sitemap_page_failure_is_retried_next_run(db, monkeypatch):
